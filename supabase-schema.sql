@@ -170,6 +170,44 @@ create table user_preferences (
 
 comment on table user_preferences is 'Style/placement preferences learned from completed sessions. Written by finalize_session() analytics path only.';
 
+-- ── 7. GENERATION JOBS ───────────────────────────────────────
+-- Backs the start-job/poll pattern for AI Design, Rework, Flash isolate, and
+-- Placement (see /api/generate, /api/generate-rework, /api/generate-flash,
+-- /api/placement + /api/generation-status, and src/lib/generation-jobs.ts).
+-- Was an in-memory Map keyed by session/design id — moved to the database
+-- because a serverless deployment (e.g. Vercel) can run the POST that starts
+-- a job and the later GET polls on different instances, which an in-memory
+-- store can't survive.
+--
+-- One job per key (a sessionId, or "flash:<designId>" / "placement:<sessionId>"
+-- for the routes that key differently) — starting a new job for the same key
+-- replaces the old one (delete-then-insert in startJob()), since a session
+-- only ever watches one batch at a time. Slots live in their own table, one
+-- row per parallel generation task, so concurrent tasks completing at the
+-- same time each update only their own row — no read-modify-write race on a
+-- shared JSON blob.
+create table generation_jobs (
+  job_key            text        primary key,
+  iteration          int         not null default 1,
+  parent_design_ids  text[]      not null default '{}',
+  user_instruction   text,
+  created_at         timestamptz not null default now()
+);
+
+create table generation_job_slots (
+  job_key      text        not null references generation_jobs(job_key) on delete cascade,
+  slot_index   int         not null,
+  status       text        not null default 'pending' check (status in ('pending','done','error')),
+  image_base64 text,
+  reason       text,
+  code         text,
+  updated_at   timestamptz not null default now(),
+  primary key (job_key, slot_index)
+);
+
+comment on table generation_jobs is 'Start-job/poll tracker for AI generation batches. Written and read only by the service role from within the generation API routes — see src/lib/generation-jobs.ts. No client-facing access, by design.';
+comment on table generation_job_slots is 'One row per parallel generation task within a job. Separate rows (not a JSON array column) so concurrent slot completions never race on a read-modify-write.';
+
 -- ── STORAGE BUCKETS ─────────────────────────────────────────
 -- session-assets: all session images (refs, designs, body, composites, previews)
 -- reference-images: kept for legacy compatibility, not used by current code
@@ -296,6 +334,10 @@ alter table tattoo_designs   enable row level security;
 alter table chat_messages    enable row level security;
 alter table placements       enable row level security;
 alter table user_preferences enable row level security;
+alter table generation_jobs      enable row level security;
+alter table generation_job_slots enable row level security;
+-- No policies follow for these two, on purpose — same as Storage deletes,
+-- they're service-role-only and never read or written from the browser.
 
 -- NOTE: API routes use SUPABASE_SERVICE_ROLE_KEY which bypasses RLS entirely.
 -- These policies apply to direct Supabase client calls from the browser (studio UI).

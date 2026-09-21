@@ -1,0 +1,281 @@
+<title>Plan Pricing Worksheet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Source+Sans+3:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --bg: #F7F5F0;
+    --surface: #FFFFFF;
+    --surface-2: #F0ECE3;
+    --ink: #211E19;
+    --muted: #6E6656;
+    --border: #E3DCCC;
+    --accent: #8C6B24;
+    --accent-soft: #F3E9D2;
+    --good: #2F6B45;
+    --good-soft: #E4EFE6;
+    --shadow: 0 1px 2px rgba(40,32,10,0.06), 0 8px 24px rgba(40,32,10,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17140F; --surface: #1E1A14; --surface-2: #26211A;
+      --ink: #EFEAE0; --muted: #A69C87; --border: #362F24;
+      --accent: #D3AD5C; --accent-soft: #332913;
+      --good: #6FBE87; --good-soft: #1E2C21;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17140F; --surface: #1E1A14; --surface-2: #26211A;
+    --ink: #EFEAE0; --muted: #A69C87; --border: #362F24;
+    --accent: #D3AD5C; --accent-soft: #332913;
+    --good: #6FBE87; --good-soft: #1E2C21;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: "Source Sans 3", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 15px; line-height: 1.5;
+  }
+  h1, h2 { font-family: "Fraunces", Georgia, serif; }
+  .mono, td.num, th.num, .price { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+  .wrap { max-width: 980px; margin: 0 auto; padding-inline: 20px; padding-block: 32px 60px; }
+
+  header { margin-bottom: 30px; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+  .eyebrow { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin: 0 0 8px; }
+  h1 { font-size: clamp(24px,3.6vw,32px); margin: 0 0 6px; font-weight: 700; }
+  header .note { color: var(--muted); font-size: 13px; margin: 0; }
+
+  .currency-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; padding: 3px; background: var(--surface); flex-shrink: 0; box-shadow: var(--shadow); }
+  .currency-toggle button {
+    border: none; background: transparent; padding: 7px 14px; border-radius: 999px;
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; font-weight: 600;
+    color: var(--muted); cursor: pointer; display: flex; align-items: center; gap: 5px;
+  }
+  .currency-toggle button.active { background: var(--accent); color: var(--surface); }
+
+  section { margin-bottom: 34px; }
+  h2 {
+    font-size: 13px; font-weight: 700; font-family: "IBM Plex Mono", monospace;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent);
+    margin: 0 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  }
+
+  .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 480px; }
+  th, td { text-align: left; padding: 9px 13px; border-bottom: 1px solid var(--border); }
+  thead th { background: var(--surface-2); font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--surface-2); }
+  td.num, th.num { text-align: right; }
+  td.free { color: var(--good); font-size: 12.5px; }
+
+  ul.plain { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(230px,1fr)); gap: 6px 20px; }
+  ul.plain li { padding-left: 18px; position: relative; font-size: 14px; }
+  ul.plain li::before { content: "—"; position: absolute; left: 0; color: var(--accent); }
+
+  .plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 800px) { .plans { grid-template-columns: 1fr; } }
+  .plan {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 20px; display: flex; flex-direction: column; gap: 12px; box-shadow: var(--shadow);
+  }
+  .plan.featured { border-color: var(--accent); border-width: 2px; }
+  .plan .name { font-family: "Fraunces", serif; font-weight: 700; font-size: 17px; }
+  .plan .price { font-size: 26px; font-weight: 600; color: var(--accent); }
+  .plan .price span { font-size: 12px; color: var(--muted); font-family: "Source Sans 3", sans-serif; }
+  .plan ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+  .plan ul li { padding-left: 18px; position: relative; font-size: 13.5px; }
+  .plan ul li::before { content: "✓"; position: absolute; left: 0; color: var(--good); font-weight: 700; }
+  .plan .econ { border-top: 1px solid var(--border); padding-top: 10px; font-size: 12.5px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+  .plan .econ b { color: var(--ink); font-family: "IBM Plex Mono", monospace; }
+
+  footer { color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); padding-top: 16px; margin-top: 10px; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <p class="eyebrow">Cleopatra Ink Studio — Internal</p>
+      <h1>Plan Pricing Worksheet</h1>
+      <p class="note">Estimated planning costs — not final invoices. ₹96 ≈ $1.</p>
+    </div>
+    <div class="currency-toggle" id="currency-toggle" role="group" aria-label="Currency">
+      <button type="button" data-cur="inr" class="active">₹ INR</button>
+      <button type="button" data-cur="usd">$ USD</button>
+    </div>
+  </header>
+
+  <section>
+    <h2>Feature Cost Reference</h2>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Feature</th><th>Unit</th><th class="num">Est. Cost</th></tr></thead>
+        <tbody>
+          <tr><td>AI Design — first batch</td><td>5 images</td><td class="num"><span class="cur" data-inr="10">₹10</span> – <span class="cur" data-inr="34">₹34</span></td></tr>
+          <tr><td>AI Design — refinement round</td><td>2 images</td><td class="num"><span class="cur" data-inr="4">₹4</span> – <span class="cur" data-inr="13">₹13</span></td></tr>
+          <tr><td>Rework (cover-up/extend)</td><td>5 images</td><td class="num"><span class="cur" data-inr="10">₹10</span> – <span class="cur" data-inr="34">₹34</span></td></tr>
+          <tr><td>Placement composite</td><td>1 image</td><td class="num"><span class="cur" data-inr="2">₹2</span> – <span class="cur" data-inr="18">₹18</span></td></tr>
+          <tr><td>Flash/sticker isolate</td><td>1 image</td><td class="num"><span class="cur" data-inr="2">₹2</span> – <span class="cur" data-inr="12">₹12</span></td></tr>
+          <tr><td>Storage</td><td>per GB / month</td><td class="num"><span class="cur" data-inr="2">₹2</span></td></tr>
+          <tr><td>WhatsApp marketing message</td><td>per message</td><td class="num"><span class="cur" data-inr="1.02">₹1.02</span></td></tr>
+          <tr><td>WhatsApp utility message</td><td>per message</td><td class="num"><span class="cur" data-inr="0.14">₹0.14</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Third-Party Providers</h2>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Provider</th><th>For</th><th>Free Tier</th><th class="num">Paid Cost</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Supabase Pro</td><td>Database, auth, storage</td>
+            <td class="free">500MB DB, 1GB storage, 5GB bandwidth</td>
+            <td class="num"><span class="cur" data-inr="2400">₹2,400</span>/mo (100GB incl.)</td>
+          </tr>
+          <tr>
+            <td>KEI (kie.ai)</td><td>AI image generation</td>
+            <td class="free">80 credits, one-time on signup</td>
+            <td class="num">pay-per-image ↑</td>
+          </tr>
+          <tr>
+            <td>Sentry</td><td>Error tracking</td>
+            <td class="free">5,000 errors/month</td>
+            <td class="num">Free → <span class="cur" data-inr="2500">₹2,500</span>–<span class="cur" data-inr="2780">₹2,780</span>/mo</td>
+          </tr>
+          <tr>
+            <td>Resend</td><td>Transactional email</td>
+            <td class="free">3,000 emails/month (100/day cap)</td>
+            <td class="num">Free → <span class="cur" data-inr="1920">₹1,920</span>/mo (50K)</td>
+          </tr>
+          <tr>
+            <td>WhatsApp BSP</td><td>WhatsApp sending, per client</td>
+            <td class="free">$0/mo plan + $1 credit (e.g. AiSensy)</td>
+            <td class="num">~<span class="cur" data-inr="1500">₹1,500</span>/mo each</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Super Admin Panel — What It Controls</h2>
+    <ul class="plain">
+      <li>View every client business</li>
+      <li>Edit any client's plan</li>
+      <li>Edit designer / admin seat limits</li>
+      <li>Toggle any feature per client</li>
+      <li>Set AI credit pool per client</li>
+      <li>Set WhatsApp limits per client</li>
+      <li>Suspend / reactivate a client</li>
+      <li>View platform-wide usage & spend</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>WhatsApp Marketing</h2>
+    <ul class="plain">
+      <li>Create marketing templates</li>
+      <li>Submit for Meta approval (24–48h)</li>
+      <li>Send to customer list</li>
+      <li>See sent / delivered / read</li>
+    </ul>
+    <div class="table-scroll" style="margin-top:10px">
+      <table>
+        <tbody>
+          <tr><td>Templates included</td><td class="num">5 / month</td></tr>
+          <tr><td>Messages included</td><td class="num">500 / month</td></tr>
+          <tr><td>Overage</td><td class="num"><span class="cur" data-inr="2">₹2</span> / message</td></tr>
+          <tr><td>Daily send cap</td><td class="num">set by Meta's quality rating — grows over time</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2 style="font-size:22px; text-transform:none; letter-spacing:0; font-family:'Fraunces',serif;">Example Plans</h2>
+    <div class="plans">
+      <div class="plan">
+        <div class="name">Base</div>
+        <ul>
+          <li>Upload existing design</li>
+          <li>Placement preview — 5/session, 50/mo</li>
+          <li>Design catalog + folders</li>
+          <li>Customer history</li>
+          <li>Stencil printing</li>
+        </ul>
+      </div>
+      <div class="plan featured">
+        <div class="name">Pro</div>
+        <ul>
+          <li>Everything in Base</li>
+          <li>AI Design generation</li>
+          <li>Rework / cover-up</li>
+          <li>Chat-based refinement</li>
+          <li>150 AI credits/mo, <span class="cur" data-inr="20" data-usd="0.25">₹20</span>/image after</li>
+        </ul>
+      </div>
+      <div class="plan">
+        <div class="name">Add-on: WhatsApp</div>
+        <ul>
+          <li>500 messages included</li>
+          <li>5 templates included</li>
+          <li><span class="cur" data-inr="2" data-usd="0.05">₹2</span>/message overage</li>
+          <li>Available on either plan</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>Estimates only — verify KEI, Sentry, and BSP rates against real invoices before finalizing prices. September 2026.</footer>
+</div>
+
+<script>
+  (function () {
+    var RATE = 96;
+    var curs = Array.prototype.slice.call(document.querySelectorAll('.cur'));
+    var originals = curs.map(function (el) { return el.textContent; });
+    var isUSD = false;
+
+    function formatUSD(inr) {
+      var usd = inr / RATE;
+      if (usd < 1) return '$' + usd.toFixed(4);
+      return '$' + usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function render() {
+      curs.forEach(function (el, i) {
+        if (isUSD) {
+          // A deliberately-chosen round USD price beats a mechanical /96
+          // conversion for anything customer-facing (a plan price, its cost
+          // and margin) — real pricing pages pick a clean number per
+          // currency rather than converting one. Reference/unit-cost tables
+          // fall back to the computed rate since precision there is fine.
+          if (el.hasAttribute('data-usd')) {
+            el.textContent = '$' + parseFloat(el.getAttribute('data-usd')).toLocaleString('en-US');
+          } else {
+            el.textContent = formatUSD(parseFloat(el.getAttribute('data-inr')));
+          }
+        } else {
+          el.textContent = originals[i];
+        }
+      });
+    }
+
+    var toggle = document.getElementById('currency-toggle');
+    toggle.addEventListener('click', function (e) {
+      var btn = e.target.closest('button');
+      if (!btn) return;
+      isUSD = btn.getAttribute('data-cur') === 'usd';
+      Array.prototype.forEach.call(toggle.querySelectorAll('button'), function (b) {
+        b.classList.toggle('active', b === btn);
+      });
+      render();
+    });
+  })();
+</script>

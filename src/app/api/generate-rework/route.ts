@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server";
 import { createKeiTask, waitForKeiTask, KeiTaskFailedError, KeiCreditsError } from "@/lib/kei-api";
 import { buildReworkPrompt } from "@/lib/prompts-rework";
 import { uploadBase64 } from "@/lib/storage";
@@ -89,34 +89,39 @@ export async function POST(req: NextRequest) {
   });
 
   const clampedCount = Math.min(5, Math.max(1, Number(count) || 5));
-  startJob(sessionId, iteration, clampedCount, isEdit ? parentDesignIds : [], isEdit ? editInstruction : null);
+  try {
+    await startJob(sessionId, iteration, clampedCount, isEdit ? parentDesignIds : [], isEdit ? editInstruction : null);
+  } catch (err) {
+    return Response.json({ error: `Couldn't start the generation job: ${(err as Error).message}` }, { status: 500 });
+  }
 
-  // Fire and forget — the job runs independent of this request/response, so
-  // a client that disconnects (page reload, closed tab) doesn't kill it. The
-  // client polls /api/generation-status for progress instead of holding this
-  // connection open for the full 1-2 minutes it can take.
-  void (async () => {
+  // Runs after the response is sent, but the platform is told to keep this
+  // invocation alive until it resolves — unlike a bare fire-and-forget
+  // promise, which a serverless platform can freeze the moment the response
+  // goes out. The client polls /api/generation-status for progress instead
+  // of holding a connection open for the full 1-2 minutes this can take.
+  after(async () => {
     await Promise.allSettled(
       Array.from({ length: clampedCount }, (_, index) =>
         runOneTask(prompt, inputUrls)
           .then(async (result) => {
             if (!result.ok) {
               console.warn(`[generate-rework] task ${index} failed: ${result.reason}`);
-              setSlot(sessionId, index, { status: "error", reason: result.reason, code: result.credits ? "insufficient_credits" : undefined });
+              await setSlot(sessionId, index, { status: "error", reason: result.reason, code: result.credits ? "insufficient_credits" : undefined });
               return;
             }
             try {
               const imageBase64 = await fetchAsBase64(result.url);
-              setSlot(sessionId, index, { status: "done", imageBase64 });
+              await setSlot(sessionId, index, { status: "done", imageBase64 });
             } catch (err) {
               console.error(`[generate-rework] fetching result failed for task ${index}:`, err);
-              setSlot(sessionId, index, { status: "error", reason: `Image fetch failed: ${(err as Error).message}` });
+              await setSlot(sessionId, index, { status: "error", reason: `Image fetch failed: ${(err as Error).message}` });
             }
           })
           .catch((err) => setSlot(sessionId, index, { status: "error", reason: (err as Error).message }))
       )
     );
-  })();
+  });
 
   return Response.json({ ok: true, iteration, sourcePhotoUrl: !isEdit ? sourceUrl : undefined });
 }

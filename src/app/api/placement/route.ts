@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server";
 import { createKeiTask, waitForKeiTask, KeiTaskFailedError, KeiCreditsError } from "@/lib/kei-api";
 // TEST: swapped from "@/lib/prompts" to the minimal-prompt version — see
 // prompts-test.ts. Revert this import to go back to the full-length prompts.
@@ -108,13 +108,17 @@ export async function POST(req: NextRequest) {
   // connection open for the 1-3 minutes this generation can take — that
   // also means a page reload doesn't kill an in-progress preview.
   const jobKey = placementJobKey(sessionId);
-  startJob(jobKey, 1, 1);
+  try {
+    await startJob(jobKey, 1, 1);
+  } catch (err) {
+    return Response.json({ error: `Couldn't start the generation job: ${(err as Error).message}` }, { status: 500 });
+  }
 
-  void (async () => {
+  after(async () => {
     const result = await runKeiWithRetry(prompt, inputUrls);
     if (!result.ok) {
       console.warn(`[placement] generation failed: ${result.reason}`);
-      setSlot(jobKey, 0, {
+      await setSlot(jobKey, 0, {
         status: "error",
         reason: result.reason,
         code: result.kind === "credits" ? "insufficient_credits" : undefined,
@@ -123,12 +127,12 @@ export async function POST(req: NextRequest) {
     }
     try {
       const imageBase64 = await fetchAsBase64(result.url);
-      setSlot(jobKey, 0, { status: "done", imageBase64 });
+      await setSlot(jobKey, 0, { status: "done", imageBase64 });
     } catch (err) {
       console.error("[placement] fetching result failed:", err);
-      setSlot(jobKey, 0, { status: "error", reason: `Fetching result failed: ${(err as Error).message}` });
+      await setSlot(jobKey, 0, { status: "error", reason: `Fetching result failed: ${(err as Error).message}` });
     }
-  })();
+  });
 
   return Response.json({ ok: true });
 }

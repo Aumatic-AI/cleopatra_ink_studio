@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server";
 import { createKeiTask, waitForKeiTask, KeiTaskFailedError, KeiCreditsError } from "@/lib/kei-api";
 import { startJob, setSlot } from "@/lib/generation-jobs";
 
@@ -30,24 +30,28 @@ export async function POST(req: NextRequest) {
   // Keyed separately from the chat's per-session job so finalizing a design
   // (which can happen mid-chat) never collides with an in-flight chat edit.
   const jobKey = `flash:${designId}`;
-  startJob(jobKey, 1, 1);
+  try {
+    await startJob(jobKey, 1, 1);
+  } catch (err) {
+    return Response.json({ error: `Couldn't start the generation job: ${(err as Error).message}` }, { status: 500 });
+  }
 
-  void (async () => {
+  after(async () => {
     try {
       const taskId = await createKeiTask(FLASH_PROMPT, [imageUrl], { model: "gpt-image-2-image-to-image" });
       const url = await waitForKeiTask(taskId);
       const imageBase64 = await fetchAsBase64(url);
-      setSlot(jobKey, 0, { status: "done", imageBase64 });
+      await setSlot(jobKey, 0, { status: "done", imageBase64 });
     } catch (err) {
       if (err instanceof KeiCreditsError) {
-        setSlot(jobKey, 0, { status: "error", reason: err.message, code: "insufficient_credits" });
+        await setSlot(jobKey, 0, { status: "error", reason: err.message, code: "insufficient_credits" });
       } else if (err instanceof KeiTaskFailedError) {
-        setSlot(jobKey, 0, { status: "error", reason: err.failMsg ?? "Unknown KEI failure" });
+        await setSlot(jobKey, 0, { status: "error", reason: err.failMsg ?? "Unknown KEI failure" });
       } else {
-        setSlot(jobKey, 0, { status: "error", reason: (err as Error).message });
+        await setSlot(jobKey, 0, { status: "error", reason: (err as Error).message });
       }
     }
-  })();
+  });
 
   return Response.json({ ok: true });
 }

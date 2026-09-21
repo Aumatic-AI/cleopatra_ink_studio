@@ -1,0 +1,451 @@
+<title>Migration & Permissions Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Source+Sans+3:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --bg: #F7F5F0;
+    --surface: #FFFFFF;
+    --surface-2: #F0ECE3;
+    --ink: #211E19;
+    --muted: #6E6656;
+    --border: #E3DCCC;
+    --accent: #8C6B24;
+    --accent-soft: #F3E9D2;
+    --good: #2F6B45;
+    --good-soft: #E4EFE6;
+    --warn: #9A4A1E;
+    --warn-soft: #F5E4D6;
+    --code-bg: #EFEAE0;
+    --shadow: 0 1px 2px rgba(40,32,10,0.06), 0 8px 24px rgba(40,32,10,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17140F; --surface: #1E1A14; --surface-2: #26211A;
+      --ink: #EFEAE0; --muted: #A69C87; --border: #362F24;
+      --accent: #D3AD5C; --accent-soft: #332913;
+      --good: #6FBE87; --good-soft: #1E2C21;
+      --warn: #E08A50; --warn-soft: #2E2013;
+      --code-bg: #241F18;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17140F; --surface: #1E1A14; --surface-2: #26211A;
+    --ink: #EFEAE0; --muted: #A69C87; --border: #362F24;
+    --accent: #D3AD5C; --accent-soft: #332913;
+    --good: #6FBE87; --good-soft: #1E2C21;
+    --warn: #E08A50; --warn-soft: #2E2013;
+    --code-bg: #241F18;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: "Source Sans 3", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 15.5px; line-height: 1.6;
+  }
+  h1, h2, h3 { font-family: "Fraunces", Georgia, "Times New Roman", serif; text-wrap: balance; }
+  .mono, code, table td.num { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding-inline: 24px; }
+
+  header.hero { padding-block: 40px 28px; border-bottom: 1px solid var(--border); }
+  .eyebrow { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin: 0 0 10px; }
+  header.hero h1 { font-size: clamp(28px, 4.2vw, 44px); font-weight: 600; margin: 0 0 12px; letter-spacing: -0.01em; }
+  header.hero p.lead { max-width: 62ch; color: var(--muted); font-size: 17px; margin: 0; }
+
+  .layout { display: grid; grid-template-columns: 220px minmax(0,1fr); gap: 40px; padding-block: 32px 80px; align-items: start; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; gap: 20px; } }
+
+  nav.toc { position: sticky; top: 20px; display: flex; flex-direction: column; gap: 2px; font-size: 13.5px; }
+  @media (max-width: 900px) {
+    nav.toc { position: static; flex-direction: row; overflow-x: auto; gap: 6px; padding-bottom: 8px; -webkit-overflow-scrolling: touch; }
+    nav.toc a { white-space: nowrap; flex-shrink: 0; }
+  }
+  nav.toc a { color: var(--muted); text-decoration: none; padding: 7px 10px; border-radius: 8px; border: 1px solid transparent; }
+  nav.toc a:hover { color: var(--ink); background: var(--surface-2); }
+  nav.toc a.active { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+
+  main { min-width: 0; display: flex; flex-direction: column; gap: 50px; }
+
+  section { scroll-margin-top: 20px; }
+  section .kicker { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--accent); letter-spacing: 0.1em; margin: 0 0 6px; }
+  section h2 { font-size: clamp(22px, 3vw, 28px); font-weight: 600; margin: 0 0 8px; }
+  section > p.dek { color: var(--muted); max-width: 68ch; margin: 0 0 18px; font-size: 15px; }
+
+  .glance { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 26px 28px; box-shadow: var(--shadow); }
+  .glance h2 { margin: 0 0 14px; font-size: 20px; }
+  .glance-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .glance-item { display: flex; gap: 12px; padding: 14px; background: var(--surface-2); border-radius: 12px; }
+  .glance-item .mark { flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-family: "IBM Plex Mono", monospace; font-size: 12px; font-weight: 700; }
+  .glance-item strong { display: block; font-size: 13.5px; margin-bottom: 2px; }
+  .glance-item span { color: var(--muted); font-size: 12.5px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; }
+  .card + .card { margin-top: 12px; }
+  .card h3 { font-size: 15px; margin: 0 0 6px; font-family: "Source Sans 3", sans-serif; font-weight: 700; }
+  .card p { margin: 0; color: var(--muted); font-size: 14px; }
+
+  .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 560px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  thead th { background: var(--surface-2); font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--surface-2); }
+
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; }
+  .pill.good { background: var(--good-soft); color: var(--good); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.no { background: var(--surface-2); color: var(--muted); }
+
+  code.field { background: var(--code-bg); padding: 1px 6px; border-radius: 5px; font-size: 12.5px; }
+
+  ul.check, ol.steps { margin: 0; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; }
+  ul.check li { padding-left: 24px; position: relative; font-size: 14px; }
+  ul.check li::before { content: "\2713"; position: absolute; left: 0; top: 0; color: var(--good); font-weight: 700; }
+  ol.steps { counter-reset: step; }
+  ol.steps li { padding-left: 32px; position: relative; font-size: 14px; }
+  ol.steps li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 0; top: 0; width: 22px; height: 22px;
+    background: var(--accent-soft); color: var(--accent); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 700;
+  }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+
+  .note { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 11px 15px; border-radius: 0 10px 10px 0; font-size: 13.5px; color: var(--ink); }
+  .note strong { color: var(--accent); }
+
+  .phase { display: flex; gap: 14px; }
+  .phase .n { flex-shrink: 0; width: 34px; height: 34px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; font-family: "IBM Plex Mono", monospace; font-weight: 700; font-size: 13px; }
+  .phase .body { flex: 1; padding-bottom: 18px; border-left: 1px solid var(--border); margin-left: -35px; padding-left: 49px; }
+  .phase:last-child .body { border-left: none; padding-bottom: 0; }
+  .phase h3 { margin: 0 0 4px; font-size: 15.5px; font-family: "Source Sans 3", sans-serif; font-weight: 700; }
+  .phase .tag { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; display: block; }
+
+  pre.mermaid { background: transparent; }
+
+  footer { border-top: 1px solid var(--border); padding-block: 24px 60px; color: var(--muted); font-size: 13px; }
+  a { color: var(--accent); }
+</style>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Cleopatra Ink Studio — Platform Strategy</p>
+    <h1>Migration &amp; Permissions Plan</h1>
+    <p class="lead">New repo, new Supabase project, same codebase as the starting point. This is the rebuilt data model and permission system — and the order to build it in.</p>
+  </div>
+</header>
+
+<div class="wrap layout">
+  <nav class="toc" id="toc">
+    <a href="#glance">At a Glance</a>
+    <a href="#axes">01 · Two Kinds of Permission</a>
+    <a href="#schema">02 · Database Schema</a>
+    <a href="#resolution">03 · Access Resolution</a>
+    <a href="#enforcement">04 · Enforcement Pattern</a>
+    <a href="#inventory">05 · Feature Inventory</a>
+    <a href="#matrix">06 · Permissions &amp; Limits</a>
+    <a href="#log-catalog">07 · Log Action Catalog</a>
+    <a href="#log-utility">08 · Logging Utility</a>
+    <a href="#migration">09 · Migration Plan</a>
+    <a href="#future">10 · Adding a Future Feature</a>
+  </nav>
+
+  <main>
+
+    <section id="glance">
+      <div class="glance">
+        <h2>At a glance</h2>
+        <div class="glance-grid">
+          <div class="glance-item"><div class="mark">1</div><div><strong>Two separate axes</strong><span>Role (admin/designer) and tenant feature access are different questions — never conflate them.</span></div></div>
+          <div class="glance-item"><div class="mark">2</div><div><strong>One feature registry</strong><span>Every feature is one key, referenced everywhere. Adding a feature never means new permission code.</span></div></div>
+          <div class="glance-item"><div class="mark">3</div><div><strong>One resolution rule</strong><span>Override beats plan default beats deny. No exceptions, no per-feature special cases.</span></div></div>
+          <div class="glance-item"><div class="mark">4</div><div><strong>Server decides, client only hides</strong><span>The frontend never is the security boundary — only the backend check is.</span></div></div>
+          <div class="glance-item"><div class="mark">5</div><div><strong>One log table, two jobs</strong><span><code class="field">usage_logs</code> is both the audit trail and the limit counter — not two systems.</span></div></div>
+          <div class="glance-item"><div class="mark">6</div><div><strong>Data model before Super Admin UI</strong><span>The panel is CRUD on top of what gets built first. It's the last phase, not the first.</span></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="axes">
+      <p class="kicker">01</p>
+      <h2>Two Kinds of Permission</h2>
+      <p class="dek">RBAC only covers one of these. What you're describing needs both, kept independent.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Axis</th><th>Question</th><th>Governed by</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Role</strong> <span class="pill no">RBAC</span></td><td>What can this staff member do?</td><td>admin / designer — unchanged, already exists</td></tr>
+            <tr><td><strong>Tenant Feature</strong> <span class="pill good">new</span></td><td>What can this business access, and how much?</td><td>Plan defaults + per-org overrides</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note" style="margin-top:14px"><strong>Both must pass.</strong> An action succeeds only if the org has the feature AND the staff member's role is allowed to use it. Two independent checks, composed — never merged into one.</div>
+    </section>
+
+    <section id="schema">
+      <p class="kicker">02</p>
+      <h2>Database Schema</h2>
+      <p class="dek">Six tables carry the whole permission system. Everything existing just gains <code class="field">organization_id</code>.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Table</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code class="field">organizations</code></td><td>One row per studio client (tenant)</td></tr>
+            <tr><td><code class="field">plans</code></td><td>Subscription tiers — name, price</td></tr>
+            <tr><td><code class="field">plan_features</code></td><td>Default grid: (plan, feature_key) → enabled, limit_value</td></tr>
+            <tr><td><code class="field">organization_feature_overrides</code></td><td>Per-org exceptions to the plan default — always wins when present</td></tr>
+            <tr><td><code class="field">usage_logs</code></td><td>One row per action — audit trail + limit counter, see 07</td></tr>
+            <tr><td><code class="field">platform_admins</code></td><td>Your team (Super Admins) — not tenant-scoped, separate from <code class="field">staff</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:14px;color:var(--muted);font-size:13.5px">Existing tables (<code class="field">staff</code>, <code class="field">users</code>, <code class="field">sessions</code>, <code class="field">tattoo_designs</code>, <code class="field">placements</code>, <code class="field">chat_messages</code>) each gain <code class="field">organization_id</code>. Every RLS policy gains the matching clause.</p>
+      <pre class="mermaid">
+erDiagram
+    ORGANIZATIONS ||--|| PLANS : subscribes_to
+    PLANS ||--o{ PLAN_FEATURES : defines
+    ORGANIZATIONS ||--o{ ORG_OVERRIDES : overrides
+    ORGANIZATIONS ||--o{ USAGE_LOGS : logs
+    ORGANIZATIONS ||--o{ STAFF : employs
+    ORGANIZATIONS ||--o{ SESSIONS : owns
+
+    PLANS { uuid id PK text name int price_cents }
+    PLAN_FEATURES { uuid plan_id FK text feature_key bool enabled int limit_value }
+    ORG_OVERRIDES { uuid organization_id FK text feature_key bool enabled int limit_value }
+    USAGE_LOGS { uuid organization_id FK text feature_key text action uuid staff_id FK uuid session_id jsonb metadata timestamptz created_at }
+    ORGANIZATIONS { uuid id PK text name uuid plan_id FK text status }
+      </pre>
+    </section>
+
+    <section id="resolution">
+      <p class="kicker">03</p>
+      <h2>Access Resolution</h2>
+      <p class="dek">One rule, checked the same way for every feature, every time.</p>
+      <ol class="steps">
+        <li>Override exists for (org, feature)? → use its enabled flag and limit.</li>
+        <li>Else → use the plan's default for (plan, feature).</li>
+        <li>Else → denied. No entry means off, not on.</li>
+        <li>If enabled with a limit → count this period's <code class="field">usage_logs</code> rows; over the limit is a deny too.</li>
+      </ol>
+    </section>
+
+    <section id="enforcement">
+      <p class="kicker">04</p>
+      <h2>Enforcement Pattern</h2>
+      <p class="dek">One backend function. One frontend hook. Every feature uses the same two, forever.</p>
+      <div class="two-col">
+        <div class="card">
+          <h3>Backend — the real gate</h3>
+          <p><code class="field">getEffectiveAccess(orgId, featureKey)</code> runs first in every gated API route. Denies before any expensive work starts. This is the only place a disabled feature is actually enforced.</p>
+        </div>
+        <div class="card">
+          <h3>Frontend — cosmetic only</h3>
+          <p><code class="field">useFeature(featureKey)</code> hides nav items and buttons the org can't use. Never trusted for security — the backend check runs independently either way.</p>
+        </div>
+      </div>
+      <div class="note" style="margin-top:14px"><strong>Why this is future-proof:</strong> a new feature adds a registry key, not new code. Both functions already handle any key you give them.</div>
+    </section>
+
+    <section id="inventory">
+      <p class="kicker">05</p>
+      <h2>Feature Inventory</h2>
+      <p class="dek">Every screen and action in the app today, grouped into the feature keys the registry will use.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Group</th><th>Feature key</th><th>What it covers</th><th>Base</th><th>Pro</th></tr></thead>
+          <tbody>
+            <tr><td rowspan="3">Customer</td><td><code class="field">customer_management</code></td><td>Create, search, view history</td><td><span class="pill good">on</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td><code class="field">upload_existing</code></td><td>Upload a finished design, no AI</td><td><span class="pill good">on</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td><code class="field">browse_previous</code></td><td>Browse-previous-designs picker</td><td><span class="pill good">on</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td rowspan="5">AI Generation</td><td><code class="field">ai_design</code></td><td>Chat generate/refine batches</td><td><span class="pill no">off</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td><code class="field">rework</code></td><td>Cover-up / extend flow</td><td><span class="pill no">off</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td><code class="field">text_tattoo</code></td><td>Text-tattoo generation mode</td><td><span class="pill no">off</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td><code class="field">flash_isolate</code></td><td>Sticker/flash isolate for stencils</td><td><span class="pill no">off</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td><code class="field">enhance_prompt</code></td><td>GPT-4o-mini description enhancer</td><td><span class="pill no">off</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td rowspan="2">References</td><td><code class="field">pinterest_search</code></td><td>Pinterest reference search</td><td><span class="pill good">on</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td><code class="field">camera_capture</code></td><td>In-browser camera capture</td><td><span class="pill good">on</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td rowspan="2">Placement &amp; Print</td><td><code class="field">placement</code></td><td>Body placement composite</td><td><span class="pill good">on</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td><code class="field">print_stencil</code></td><td>A4 stencil PDF</td><td><span class="pill good">on</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td rowspan="3">Staff &amp; Admin</td><td><code class="field">designer_seats</code></td><td>Active designer accounts</td><td>limit</td><td>limit</td></tr>
+            <tr><td><code class="field">admin_seats</code></td><td>Active admin accounts</td><td>limit</td><td>limit</td></tr>
+            <tr><td><code class="field">admin_dashboard</code></td><td>KPIs, trend chart, leaderboard</td><td><span class="pill good">on</span></td><td><span class="pill good">on</span></td></tr>
+            <tr><td>Data lifecycle</td><td><code class="field">trash_retention</code></td><td>Recently-deleted recovery window</td><td>limit</td><td>limit</td></tr>
+            <tr><td rowspan="2">Deferred</td><td><code class="field">catalog</code></td><td>Folder-based design catalog</td><td><span class="pill no">off</span></td><td><span class="pill no">off</span></td></tr>
+            <tr><td><code class="field">whatsapp</code></td><td>WhatsApp marketing sends</td><td><span class="pill no">off</span></td><td><span class="pill no">off</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:14px;color:var(--muted);font-size:13.5px">Deferred features get their registry key reserved now, off for everyone, so switching them on later is a data change — see <a href="#future">10</a>.</p>
+    </section>
+
+    <section id="matrix">
+      <p class="kicker">06</p>
+      <h2>Permissions &amp; Limits</h2>
+      <p class="dek">Two kinds of row: a toggle (on/off) or a limit (a count per period). Numbers below are starting suggestions, not final pricing.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Feature key</th><th>Kind</th><th>Limit</th><th>Base</th><th>Pro</th></tr></thead>
+          <tbody>
+            <tr><td><code class="field">ai_design</code></td><td>Toggle + pooled limit</td><td>AI credits / month, shared with rework, text tattoo, flash</td><td class="num">—</td><td class="num">150</td></tr>
+            <tr><td><code class="field">rework</code></td><td>Toggle</td><td>Draws from the same AI credit pool</td><td class="num">—</td><td class="num">✓</td></tr>
+            <tr><td><code class="field">text_tattoo</code></td><td>Toggle</td><td>Draws from the same AI credit pool</td><td class="num">—</td><td class="num">✓</td></tr>
+            <tr><td><code class="field">flash_isolate</code></td><td>Toggle</td><td>Draws from the same AI credit pool</td><td class="num">—</td><td class="num">✓</td></tr>
+            <tr><td><code class="field">enhance_prompt</code></td><td>Toggle + limit</td><td>Calls / month (OpenAI cost)</td><td class="num">—</td><td class="num">300</td></tr>
+            <tr><td><code class="field">placement</code></td><td>Limit (always on)</td><td>Retries / session, then / month pooled</td><td class="num">5 · 50</td><td class="num">5 · 150</td></tr>
+            <tr><td><code class="field">ai_design</code> chat</td><td>Limit</td><td>Refinement rounds / session</td><td class="num">—</td><td class="num">20</td></tr>
+            <tr><td><code class="field">pinterest_search</code></td><td>Limit</td><td>Searches / day (protects the proxy)</td><td class="num">100</td><td class="num">300</td></tr>
+            <tr><td><code class="field">designer_seats</code></td><td>Limit</td><td>Active designer accounts</td><td class="num">2</td><td class="num">10</td></tr>
+            <tr><td><code class="field">admin_seats</code></td><td>Limit</td><td>Active admin accounts</td><td class="num">1</td><td class="num">3</td></tr>
+            <tr><td><code class="field">storage_quota</code></td><td>Limit</td><td>GB, then overage / GB</td><td class="num">5 GB</td><td class="num">50 GB</td></tr>
+            <tr><td><code class="field">trash_retention</code></td><td>Limit</td><td>Days a deleted session is recoverable</td><td class="num">30</td><td class="num">60</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note" style="margin-top:16px"><strong>Suggested additions</strong> — not yet discussed, worth deciding on now while the registry is being designed:</div>
+      <ul class="check" style="margin-top:10px">
+        <li><strong>Data export</strong> — bulk CSV of customers/sessions; off by default, a Pro perk</li>
+        <li><strong>Stencil branding</strong> — studio logo on the printed PDF; Pro-only</li>
+        <li><strong>Custom house styles</strong> — a studio adds its own named styles beyond the standard list; Pro-only</li>
+        <li><strong>Concurrent generation cap</strong> — max parallel KEI jobs platform-wide, protects shared spend during a burst, not per-org</li>
+        <li><strong>Staff device sessions</strong> — how many devices one staff login can be active on at once</li>
+        <li><strong>Log visibility</strong> — designers see only their own usage logs; only admins see the org's full log</li>
+      </ul>
+    </section>
+
+    <section id="log-catalog">
+      <p class="kicker">07</p>
+      <h2>Log Action Catalog</h2>
+      <p class="dek">One feature key can log several distinct actions. Every row below is a value the <code class="field">action</code> column can take.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Feature key</th><th>Actions logged</th><th>Counts toward a limit?</th></tr></thead>
+          <tbody>
+            <tr><td><code class="field">customer</code></td><td>created, updated, viewed</td><td>No</td></tr>
+            <tr><td><code class="field">session</code></td><td>created, assigned, status_changed, deleted, restored, hard_deleted</td><td>No</td></tr>
+            <tr><td><code class="field">ai_design</code></td><td>batch_generated, refinement_round, finalized <span class="mono" style="color:var(--muted)">(+ staff_id of who finalized)</span></td><td>refinement_round → yes</td></tr>
+            <tr><td><code class="field">rework</code></td><td>batch_generated</td><td>Yes (shared AI pool)</td></tr>
+            <tr><td><code class="field">flash_isolate</code></td><td>generated</td><td>Yes (shared AI pool)</td></tr>
+            <tr><td><code class="field">placement</code></td><td>round_generated, finalized <span class="mono" style="color:var(--muted)">(+ staff_id of who finalized)</span></td><td>round_generated → yes</td></tr>
+            <tr><td><code class="field">print_stencil</code></td><td>downloaded</td><td>No</td></tr>
+            <tr><td><code class="field">enhance_prompt</code></td><td>requested</td><td>Yes</td></tr>
+            <tr><td><code class="field">pinterest_search</code></td><td>searched</td><td>Yes</td></tr>
+            <tr><td><code class="field">staff</code></td><td>created, updated, password_reset, deactivated, reactivated</td><td>No</td></tr>
+            <tr><td><code class="field">auth</code></td><td>login, logout, login_failed, session_timeout</td><td>No</td></tr>
+            <tr><td><code class="field">trash</code></td><td>viewed, restored, purged</td><td>No</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note" style="margin-top:14px"><strong>One row, two jobs.</strong> A <code class="field">round_generated</code> row is both "what happened, by whom, when" and, counted for the period, "how many they've used." No separate quota table.</div>
+    </section>
+
+    <section id="log-utility">
+      <p class="kicker">08</p>
+      <h2>Logging Utility</h2>
+      <p class="dek">One shared contract, not one function pretending to run in two places.</p>
+      <ul class="check">
+        <li>One file, <code class="field">src/lib/usage-log.ts</code>, exports the full list of valid (feature_key, action) pairs as a typed const — every call site autocompletes from it, typos become type errors</li>
+        <li>It also exports <code class="field">buildLogRow(...)</code> — a pure function that shapes one row: org, staff, session, feature_key, action, target_id, metadata, timestamp</li>
+        <li>Server routes (generation, placement — already service-role, already hold a third-party secret) call <code class="field">logUsageServer(row)</code>: inserts via the service-role client, never blocks or fails the parent response, retries once on the known Node→Supabase flakiness</li>
+        <li>Browser-triggered actions (customer, session, staff, trash CRUD) call <code class="field">logUsageBrowser(row)</code>: same row shape, inserted via the browser client right alongside the write it's logging</li>
+        <li>The limit check itself — the SELECT count — always runs server-side, in the same route as the gated action, immediately before it. A browser-reported count is never trusted for a security-relevant limit.</li>
+      </ul>
+      <div class="note" style="margin-top:14px"><strong>Why not one literal universal function:</strong> server and browser use different Supabase clients with different trust levels — collapsing them would mean either exposing the service role to the browser, or routing simple CRUD logs through an extra API hop for no reason. One shared row shape and one shared action registry gets the same consistency without that.</div>
+      <div class="note" style="margin-top:10px"><strong>Why one table, not a queue or a third-party log service:</strong> at this scale (dozens of studio clients, one action per gated request) a single indexed Postgres table is simplest and keeps logs queryable from the Super Admin panel with plain SQL. Revisit only if a single organization's monthly log volume starts running into the hundreds of thousands of rows — the fix then is monthly partitioning of <code class="field">usage_logs</code>, not a new system.</div>
+    </section>
+
+    <section id="migration">
+      <p class="kicker">09</p>
+      <h2>Migration Plan</h2>
+      <p class="dek">Data model and enforcement first. Super Admin UI last — it just manages what already exists by then.</p>
+
+      <div class="phase">
+        <div class="n">0</div>
+        <div class="body">
+          <span class="tag">Setup</span>
+          <h3>New repo, new Supabase project</h3>
+          <p style="color:var(--muted);font-size:14px;margin:0">Clone the current codebase as-is. Point env vars at the new project. Nothing else changes yet.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">1</div>
+        <div class="body">
+          <span class="tag">Foundation</span>
+          <h3>Multi-tenant tables</h3>
+          <p style="color:var(--muted);font-size:14px;margin:0"><code class="field">organizations</code> table, <code class="field">organization_id</code> added everywhere, RLS updated. Backfill one default org so the app keeps working immediately.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">2</div>
+        <div class="body">
+          <span class="tag">Foundation</span>
+          <h3>Permission tables + the two functions</h3>
+          <p style="color:var(--muted);font-size:14px;margin:0"><code class="field">plans</code>, <code class="field">plan_features</code>, overrides, <code class="field">usage_logs</code> + <code class="field">getEffectiveAccess()</code> + <code class="field">useFeature()</code>. Everything defaults to enabled — nothing breaks yet.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">3</div>
+        <div class="body">
+          <span class="tag">Wire up</span>
+          <h3>Gate existing features</h3>
+          <p style="color:var(--muted);font-size:14px;margin:0">AI Design, Rework, Placement, Print — one at a time, each just a registry key + wrapping its route and its UI.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">4</div>
+        <div class="body">
+          <span class="tag">Built last, on purpose</span>
+          <h3>Super Admin panel</h3>
+          <p style="color:var(--muted);font-size:14px;margin:0">CRUD screens over organizations, plans, and overrides. Fast to build because Phases 1–3 already did the hard part.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">5</div>
+        <div class="body">
+          <span class="tag">Deferred — later</span>
+          <h3>New features</h3>
+          <p style="color:var(--muted);font-size:14px;margin:0">Catalog folders, WhatsApp Marketing. On hold until Phases 0–4 are done.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="future">
+      <p class="kicker">10</p>
+      <h2>Adding a Future Feature</h2>
+      <p class="dek">The whole point of this system — this is the entire checklist, every time.</p>
+      <ol class="steps">
+        <li>Add one key to the feature registry</li>
+        <li>Add its default row to <code class="field">plan_features</code> per plan</li>
+        <li>Wrap the API route: <code class="field">requireFeature(orgId, key)</code></li>
+        <li>Wrap the UI: <code class="field">useFeature(key)</code></li>
+      </ol>
+      <div class="note" style="margin-top:14px">No new tables. No new permission logic. No touching Super Admin's code — the new key just appears in its existing UI.</div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <div class="wrap">Cleopatra Ink Studio — architecture plan, September 2026. Supersedes the permissions section of the earlier Studio Platform Blueprint.</div>
+</footer>
+
+<script>
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+    var sections = links.map(function (a) { return document.querySelector(a.getAttribute('href')); });
+    function onScroll() {
+      var pos = window.scrollY + 120;
+      var activeIndex = 0;
+      sections.forEach(function (sec, i) { if (sec && sec.offsetTop <= pos) activeIndex = i; });
+      links.forEach(function (a, i) { a.classList.toggle('active', i === activeIndex); });
+    }
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+</script>

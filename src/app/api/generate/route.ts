@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server";
 import { buildTattooPrompt, createKeiTask, waitForKeiTask, KeiTaskFailedError, KeiCreditsError } from "@/lib/kei-api";
 import type { RefinementInfo } from "@/lib/kei-api";
 import { uploadBase64 } from "@/lib/storage";
@@ -142,9 +142,17 @@ export async function POST(req: NextRequest) {
   // connection open for the 1-2 minutes generation can take — that also
   // means a page reload doesn't kill an in-progress batch.
   const clampedCount = Math.min(5, Math.max(1, Number(count) || 5));
-  startJob(sessionId, iteration, clampedCount, parentDesignIds, isRefinement ? refinementText : null);
+  try {
+    await startJob(sessionId, iteration, clampedCount, parentDesignIds, isRefinement ? refinementText : null);
+  } catch (err) {
+    return Response.json({ error: `Couldn't start the generation job: ${(err as Error).message}` }, { status: 500 });
+  }
 
-  void (async () => {
+  // Runs after the response is sent, but — unlike a bare fire-and-forget
+  // promise — the platform is told to keep this invocation alive until it
+  // resolves. On Vercel a plain un-awaited promise can be frozen the moment
+  // the response goes out; after() is what actually survives that.
+  after(async () => {
     await Promise.allSettled(
       Array.from({ length: clampedCount }, (_, index) => {
         // Refinement's inputUrls lead with the images being refined, not
@@ -155,21 +163,21 @@ export async function POST(req: NextRequest) {
           .then(async (result) => {
             if (!result.ok) {
               console.warn(`[generate] task ${index} failed: ${result.reason}`);
-              setSlot(sessionId, index, { status: "error", reason: result.reason, code: result.credits ? "insufficient_credits" : undefined });
+              await setSlot(sessionId, index, { status: "error", reason: result.reason, code: result.credits ? "insufficient_credits" : undefined });
               return;
             }
             try {
               const imageBase64 = await fetchAsBase64(result.url);
-              setSlot(sessionId, index, { status: "done", imageBase64 });
+              await setSlot(sessionId, index, { status: "done", imageBase64 });
             } catch (err) {
               console.error(`[generate] fetching result failed for task ${index}:`, err);
-              setSlot(sessionId, index, { status: "error", reason: `Image fetch failed: ${(err as Error).message}` });
+              await setSlot(sessionId, index, { status: "error", reason: `Image fetch failed: ${(err as Error).message}` });
             }
           })
           .catch((err) => setSlot(sessionId, index, { status: "error", reason: (err as Error).message }));
       })
     );
-  })();
+  });
 
   return Response.json({ ok: true, iteration });
 }

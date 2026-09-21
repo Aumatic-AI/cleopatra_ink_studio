@@ -66,15 +66,28 @@ above — retries never help with the systemic one).
 ## Architecture Notes
 
 **Long-running generation = start-job + poll, never one held-open request.**
-`src/lib/generation-jobs.ts` is an in-memory `Map<string, Job>` (pinned to
-`globalThis` so it survives Next.js dev-server hot reload). A `POST` to
-`/api/generate`, `/api/generate-rework`, `/api/generate-flash`, or
-`/api/placement` starts a background KEI call and returns immediately; the
-client polls `GET /api/generation-status?sessionId=<key>` instead of
-holding a connection open for the 1–2 minutes generation can take. This
-also makes a page reload resume watching an in-progress batch instead of
-losing it. Follow this pattern for any new long-running generation
-endpoint — do not reintroduce a synchronous streaming/NDJSON response.
+`src/lib/generation-jobs.ts` tracks jobs in two Supabase tables,
+`generation_jobs` (one row per job key) and `generation_job_slots` (one row
+per parallel generation task — a separate table, not a JSON array column, so
+concurrent slot completions never race on a read-modify-write). This used to
+be an in-memory `Map` pinned to `globalThis`, which only works on a single
+persistent process — it broke silently on a serverless deploy (e.g. Vercel),
+where the POST that starts a job and the later GET polls aren't guaranteed
+to land on the same instance. A `POST` to `/api/generate`,
+`/api/generate-rework`, `/api/generate-flash`, or `/api/placement` starts
+the job row, then does the actual KEI work inside Next.js's `after()` (not a
+bare un-awaited promise — a serverless platform can freeze the invocation
+the moment the response goes out, `after()` is what keeps it alive until the
+background work actually finishes) and returns immediately. The client polls
+`GET /api/generation-status?sessionId=<key>` instead of holding a connection
+open for the 1–3 minutes generation can take. `getJob()` also treats a job
+still "pending" past 6 minutes as the server having died mid-run and flips
+its remaining slots to a clear `"Generation timed out"` error, so a killed
+invocation surfaces as a visible failure instead of an endless spinner. This
+also makes a page reload (or reopening the tab later) resume watching an
+in-progress batch instead of losing it. Follow this pattern for any new
+long-running generation endpoint — do not reintroduce a synchronous
+streaming/NDJSON response, and do not go back to in-memory job state.
 
 **Soft-delete only, with a real retention policy.** `sessions.deleted_at`
 (and `staff.deleted_at`) is the only way anything gets removed from staff
@@ -197,6 +210,8 @@ and the session-flow pages are reached by both roles.
 | `chat_messages` | `id`, `session_id`, `role` (user\|assistant), `content`, `image_urls[]`, `design_ids[]` — the chat screen's source of truth |
 | `placements` | `id`, `session_id`, `placement_text`, `body_photo_url`, `final_composite_url`, `is_finalized` |
 | `user_preferences` | `user_id`, `preferred_styles[]`, `preferred_placements[]` |
+| `generation_jobs` | `job_key`, `iteration`, `parent_design_ids[]`, `user_instruction`, `created_at` — start-job/poll tracker, service-role only |
+| `generation_job_slots` | `job_key`, `slot_index`, `status`, `image_base64`, `reason`, `code` — one row per parallel generation task |
 
 **RPC:** `finalize_session(p_session_id, p_design_id, p_placement_id)` —
 marks finalized rows, prunes siblings, completes session, updates
@@ -221,7 +236,7 @@ role (used in API routes for privileged operations) bypasses RLS entirely.
 - `src/lib/prompts-rework.ts` — deliberately minimal Rework prompts (see Architecture Notes)
 - `src/lib/prompts-test.ts` — deliberately minimal Placement prompts, currently in use by `/api/placement` as an experiment against the composite-mode prompts in `prompts.ts`
 - `src/lib/kei-api.ts` — KEI HTTP client: `createKeiTask`, `waitForKeiTask`, `KeiTaskFailedError`, `KeiCreditsError`; also re-exports `buildTattooPrompt` from `prompts.ts`
-- `src/lib/generation-jobs.ts` — the start-job/poll in-memory job tracker (see Architecture Notes)
+- `src/lib/generation-jobs.ts` — the start-job/poll job tracker, backed by `generation_jobs`/`generation_job_slots` (see Architecture Notes)
 - `src/lib/session-storage-cleanup.ts` — deletes every file under `{sessionId}/` in `session-assets`; shared by the one-off hard-delete route and the scheduled purge
 - `src/lib/storage.ts` — server-side `uploadBase64`, `uploadFromUrl` to `session-assets`
 - `src/lib/browser-upload.ts` — client-side upload helpers with retry-with-backoff for genuine transient failures

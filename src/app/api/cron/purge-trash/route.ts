@@ -61,6 +61,19 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // Piggyback the generation-job table's cleanup on this same daily trigger
+  // rather than adding a second cron entry — see AGENTS.md on never adding
+  // an undocumented cron job. generation-jobs.ts already deletes a stale row
+  // lazily whenever it's polled again; this catches the rest (a job nobody
+  // ever polls again, e.g. the tab was closed and never reopened).
+  const { error: jobsPurgeError } = await supabase
+    .from("generation_jobs")
+    .delete()
+    .lt("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+  if (jobsPurgeError) {
+    console.error("[purge-trash] Failed to purge stale generation_jobs:", jobsPurgeError.message);
+  }
+
   return NextResponse.json({
     purged: purged.length,
     failed: failed.length,

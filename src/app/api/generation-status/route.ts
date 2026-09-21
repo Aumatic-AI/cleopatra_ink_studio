@@ -8,7 +8,7 @@ export async function GET(req: NextRequest) {
   const sessionId = req.nextUrl.searchParams.get("sessionId");
   if (!sessionId) return Response.json({ error: "sessionId is required" }, { status: 400 });
 
-  const job = getJob(sessionId);
+  const job = await getJob(sessionId);
   if (!job) return Response.json({ found: false });
 
   return Response.json({
