@@ -8,5 +8,8 @@
       "Bash(xargs grep -l \"maxDuration\")",
       "Bash(npx tsc *)"
     ]
-  }
+  },
+  "disabledMcpjsonServers": [
+    "supabase"
+  ]
 }

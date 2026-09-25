@@ -130,7 +130,7 @@ export default function AdminSidebarShell({ children }: { children: React.ReactN
   }, [admin, pathname]);
 
   useEffect(() => {
-    if (pathname === "/studio/login") return;
+    // if (pathname === "/studio/login") return;
     let cancelled = false;
 
     async function check() {
