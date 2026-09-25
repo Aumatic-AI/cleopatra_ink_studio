@@ -69,6 +69,11 @@ const TRASH_NAV_ITEM = {
 };
 const ALL_NAV_ITEMS = [...NAV_ITEMS, TRASH_NAV_ITEM];
 
+// Persists across client-side navigation (same JS runtime) but resets on a
+// genuine page load/reload -- that's what makes the splash below appear only
+// then, never after a login redirect or on logout.
+let hasCheckedAccessOnce = false;
+
 function NavBadge({ count }: { count: number }) {
   if (count <= 0) return null;
   return (
@@ -135,7 +140,7 @@ export default function AdminSidebarShell({ children }: { children: React.ReactN
 
     async function check() {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { if (!cancelled) setAdmin(null); return; }
+      if (!user) { if (!cancelled) setAdmin(null); hasCheckedAccessOnce = true; return; }
 
       const { data: staff } = await supabase
         .from("staff")
@@ -144,6 +149,7 @@ export default function AdminSidebarShell({ children }: { children: React.ReactN
         .maybeSingle();
 
       if (!cancelled) setAdmin(staff && staff.role === "admin" && staff.is_active ? staff : null);
+      hasCheckedAccessOnce = true;
     }
     check();
 
@@ -164,13 +170,10 @@ export default function AdminSidebarShell({ children }: { children: React.ReactN
     return <>{children}</>;
   }
 
-  // Brief branded splash while the very first role check is in flight — this
-  // shell lives in the root layout and mounts once per hard page load, so
-  // this only ever appears on a fresh app load, never on in-app navigation.
-  // Same markup as the root "/" splash (src/app/page.tsx) — that one only
-  // ever showed for visits to "/" itself, never for a deep link straight
-  // into e.g. /studio/admin/sessions/xyz, which is what this covers.
-  if (admin === undefined) {
+  // Only shown on a genuine fresh load/reload -- once the first check has
+  // run, `hasCheckedAccessOnce` stays true for the rest of this JS runtime,
+  // so a post-login redirect or a logout never re-shows it.
+  if (!hasCheckedAccessOnce && admin === undefined) {
     return (
       <main className="min-h-[100dvh] bg-bg flex flex-col items-center justify-center px-5 relative overflow-hidden">
         <div
@@ -240,10 +243,12 @@ export default function AdminSidebarShell({ children }: { children: React.ReactN
   }
 
   async function handleLogout() {
+    // Navigate first so the login-page early-return above takes over
+    // immediately, with no in-between frame of unauthorized dashboard content.
+    router.push("/studio/login");
     // scope: "local" clears this device's session without a server round
     // trip — a dropped connection there must never leave the cookie intact.
     await supabase.auth.signOut({ scope: "local" });
-    router.push("/studio/login");
     router.refresh();
   }
 
