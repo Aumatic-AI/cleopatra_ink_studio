@@ -32,7 +32,7 @@ function rotateReferences(refs: string[], slotIndex: number): string[] {
   return [refs[lead], ...refs.filter((_, i) => i !== lead)];
 }
 
-async function runOneTask(prompt: string, inputUrls: string[], model: "gpt-image-2-image-to-image" | "nano-banana-pro" = "gpt-image-2-image-to-image"): Promise<RunResult> {
+async function runOneTask(prompt: string, inputUrls: string[], model: "gpt-image-2-image-to-image" | "nano-banana-pro" = "nano-banana-pro"): Promise<RunResult> {
   let taskId: string | undefined;
   try {
     taskId = await createKeiTask(prompt, inputUrls, { model });
@@ -124,7 +124,7 @@ export async function POST(req: NextRequest) {
   }
 
   const hasUserRefs = allRefs.length > 0;
-  const generationModel = (isTextTattoo as boolean) ? "nano-banana-pro" : "gpt-image-2-image-to-image";
+  const generationModel = "nano-banana-pro";
   const prompt = buildTattooPrompt(
     description,
     style ?? "",

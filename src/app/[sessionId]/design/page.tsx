@@ -9,7 +9,7 @@ import type { DesignVariant } from "@/store/app-store";
 import CameraCapture from "@/components/camera/CameraCapture";
 import StyleSelect from "@/components/ui/StyleSelect";
 import PinterestSearch from "@/components/pinterest/PinterestSearch";
-import { blobUrlToBase64 } from "@/lib/image-utils";
+import { uploadPhotoDirect, uploadBase64Direct } from "@/lib/browser-upload";
 import { TATTOO_COLORS } from "@/lib/tattoo-colors";
 import { TypographyGenerator } from "@/components/typography/TypographyGenerator";
 import ColorPickerModal from "@/components/design/ColorPickerModal";
@@ -28,7 +28,7 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
     targetBodyArea, setTargetBodyArea,
     referenceImages, addReferenceImage, removeReferenceImage, replaceReferenceImage,
     selectedColors, toggleColor, clearColors,
-    generatedDesigns, finishGenerating,
+    generatedDesigns,
     selectDesign,
     customerName,
     persistDesigns,
@@ -46,7 +46,7 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
 
   // ── Design mode: AI generation vs direct customer upload vs rework ──
   const [designMode, setDesignMode] = useState<"ai" | "direct" | "rework">(
-    sameSession && flowType === "rework" ? "rework" : "ai"
+    sameSession && (flowType === "rework" || flowType === "direct") ? flowType : "ai"
   );
   const [directImageUrl, setDirectImageUrl] = useState<string | null>(null);
   const [directImagePreview, setDirectImagePreview] = useState<string | null>(null);
@@ -140,24 +140,15 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
     // persisted permanently (blob URLs die on page refresh and can't
     // be listed from storage for the admin overview).
     try {
-      const b64 = await blobUrlToBase64(blobUrl);
-      const res = await fetch("/api/upload-ref", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, image: b64 }),
+      const permanentUrl = await uploadPhotoDirect(blobUrl, sessionId, "refs");
+      // Swap blob URL → permanent Supabase Storage URL
+      replaceReferenceImage(blobUrl, permanentUrl);
+      setPinIdByUrl((prev) => {
+        const next = { ...prev };
+        delete next[blobUrl];
+        return { ...next, [permanentUrl]: pin.id };
       });
-
-      if (res.ok) {
-        const { url: permanentUrl } = await res.json();
-        // Swap blob URL → permanent Supabase Storage URL
-        replaceReferenceImage(blobUrl, permanentUrl);
-        setPinIdByUrl((prev) => {
-          const next = { ...prev };
-          delete next[blobUrl];
-          return { ...next, [permanentUrl]: pin.id };
-        });
-        URL.revokeObjectURL(blobUrl); // free browser memory
-      }
+      URL.revokeObjectURL(blobUrl); // free browser memory
     } catch (err) {
       console.warn("Pinterest image upload failed — keeping blob URL:", err);
       // Blob URL stays as fallback; image will still work for this session
@@ -170,17 +161,10 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
 
   // ── Typography Handler ────────────────────────────────────
   async function handleTypographyGenerated(dataUrl: string, font: string) {
-    const b64 = dataUrl.split(",")[1];
     setUploadingDirect(true);
     try {
-      const res = await fetch("/api/upload-ref", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, image: b64, prefix: "designs" }),
-      });
-      if (!res.ok) throw new Error("Upload failed");
-      const { url: permanentUrl } = await res.json();
-      
+      const permanentUrl = await uploadBase64Direct(dataUrl, sessionId, "designs");
+
       addReferenceImage(permanentUrl);
       setTextTattooRefUrl(permanentUrl);
       
@@ -209,14 +193,10 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
     setDirectStyleName(null);
 
     try {
-      const b64 = await blobUrlToBase64(previewUrl);
-      const res = await fetch("/api/upload-ref", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, image: b64, prefix: "designs" }),
-      });
-      if (!res.ok) throw new Error("Upload failed");
-      const { url } = await res.json();
+      // Browser-side upload, not /api/upload-ref — server-side Supabase
+      // writes are unreliable on this machine (see AGENTS.md); the
+      // browser's own network stack isn't.
+      const url = await uploadPhotoDirect(previewUrl, sessionId, "designs");
       setDirectImageUrl(url);
       URL.revokeObjectURL(previewUrl);
       setDirectImagePreview(url);
@@ -232,6 +212,7 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
     if (!directImageUrl) return;
     setProceedingDirect(true);
     try {
+      setFlowType("direct");
       const design: DesignVariant = {
         id: `direct-${Date.now()}`,
         imageUrl: directImageUrl,
@@ -241,8 +222,18 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
       };
       const [persisted] = await persistDesigns([design]);
       const finalDesign = persisted ?? design;
-      finishGenerating([finalDesign]);
+      // Deliberately not finishGenerating() here — that populates
+      // generatedDesigns, which the hydration effect above treats as "an
+      // ai_design session that already has results" and redirects to Chat.
+      // Nothing downstream of Upload Existing reads generatedDesigns; only
+      // selectedDesign (below) matters, which Placement actually reads.
       selectDesign(finalDesign);
+      // sessions.flow_type defaults to 'ai_design' in the DB — without this
+      // write, reopening this session later re-hydrates flowType back to
+      // 'ai_design' and the redirect-to-Chat guard above fires again on
+      // every future visit, not just this one (see also chat/page.tsx's
+      // own guard, and every other flow_type reader in the app).
+      await supabase.from("sessions").update({ flow_type: "direct" }).eq("id", sessionId);
       router.push(`/${sessionId}/placement`);
     } catch (err) {
       setDirectError((err as Error).message);
@@ -315,19 +306,15 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
               setShowCamera(false);
               if (designMode === "direct") {
                 // In direct mode, camera capture is the design itself
+                setDirectError(null);
                 setDirectImagePreview(url);
                 setDirectImageUrl(null);
                 setDirectStyleName(null);
-                blobUrlToBase64(url).then((b64) =>
-                  fetch("/api/upload-ref", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ sessionId, image: b64, prefix: "designs" }),
-                  })
-                  .then((r) => r.json())
-                  .then(({ url: permanentUrl }) => { setDirectImageUrl(permanentUrl); setDirectImagePreview(permanentUrl); })
+                setUploadingDirect(true);
+                uploadPhotoDirect(url, sessionId, "designs")
+                  .then((permanentUrl) => { setDirectImageUrl(permanentUrl); setDirectImagePreview(permanentUrl); })
                   .catch(() => setDirectError("Upload failed — please try again"))
-                );
+                  .finally(() => setUploadingDirect(false));
               } else {
                 addReferenceImage(url);
               }

@@ -46,7 +46,7 @@ export interface Database {
           user_id: string | null;
           tattoo_style: string | null;
           tattoo_description: string | null;
-          flow_type: "ai_design" | "rework";
+          flow_type: "ai_design" | "rework" | "direct";
           rework_source_photo_url: string | null;
           rework_mode: "cover" | "extend" | null;
           status: "active" | "completed" | "abandoned";
@@ -59,7 +59,7 @@ export interface Database {
           user_id?: string | null;
           tattoo_style?: string | null;
           tattoo_description?: string | null;
-          flow_type?: "ai_design" | "rework";
+          flow_type?: "ai_design" | "rework" | "direct";
           rework_source_photo_url?: string | null;
           rework_mode?: "cover" | "extend" | null;
           status?: "active" | "completed" | "abandoned";
@@ -71,7 +71,7 @@ export interface Database {
           user_id?: string | null;
           tattoo_style?: string | null;
           tattoo_description?: string | null;
-          flow_type?: "ai_design" | "rework";
+          flow_type?: "ai_design" | "rework" | "direct";
           rework_source_photo_url?: string | null;
           rework_mode?: "cover" | "extend" | null;
           status?: "active" | "completed" | "abandoned";

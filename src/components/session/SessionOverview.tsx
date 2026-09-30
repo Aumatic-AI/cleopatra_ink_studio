@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase-client";
@@ -33,7 +33,7 @@ interface SessionDetail {
   id: string;
   tattoo_style: string | null;
   tattoo_description: string | null;
-  flow_type: "ai_design" | "rework";
+  flow_type: "ai_design" | "rework" | "direct";
   status: string;
   created_at: string;
   completed_at: string | null;
@@ -42,6 +42,7 @@ interface SessionDetail {
   designer: { name: string; email: string } | null;
   tattoo_designs: DesignRow[];
   placements: PlacementRow[];
+  chat_messages: { id: string }[];
 }
 
 // ── Internal sub-components ───────────────────────────────────
@@ -148,6 +149,7 @@ function SessionOverviewSkeleton() {
 
 export default function SessionOverview({ sessionId, from, defaultBackUrl, defaultBackLabel }: SessionOverviewProps) {
   const router = useRouter();
+  const pathname = usePathname();
   const supabase = createSupabaseBrowserClient();
 
   const [session, setSession] = useState<SessionDetail | null>(null);
@@ -188,7 +190,8 @@ export default function SessionOverview({ sessionId, from, defaultBackUrl, defau
           users(first_name, phone),
           designer:designer_id(name, email),
           tattoo_designs(id, image_url, style_name, pattern_type, iteration, is_finalized, flash_image_url),
-          placements(id, placement_text, body_photo_url, final_composite_url, is_finalized)
+          placements(id, placement_text, body_photo_url, final_composite_url, is_finalized),
+          chat_messages(id)
         `)
         .eq("id", sessionId)
         .maybeSingle();
@@ -290,11 +293,31 @@ export default function SessionOverview({ sessionId, from, defaultBackUrl, defau
   const designer = Array.isArray(session.designer) ? session.designer[0] : session.designer;
   const designs = Array.isArray(session.tattoo_designs) ? session.tattoo_designs : [];
   const placements = Array.isArray(session.placements) ? session.placements : [];
+  const hasChatMessages = Array.isArray(session.chat_messages) && session.chat_messages.length > 0;
 
-  // If any design was already generated, resume in Chat to keep iterating/
-  // selecting (generation results live there now, not on the Design page);
-  // otherwise resume at Design/Rework to start from scratch.
-  const continueUrl = designs.length > 0 ? `/${session.id}/chat` : `/${session.id}/design`;
+  // Resume at whichever screen the session actually got to, not a guess:
+  //   - Upload Existing never has chat — a design already means "go straight
+  //     to Placement," nothing uploaded yet means "back to Design."
+  //   - AI Design / Rework: no chat yet means generation never started, so
+  //     Design/Rework is correct. Once chat exists, AI Design additionally
+  //     checks for a placement already begun (is_finalized or not — that
+  //     alone is the furthest point reached) before sending back to Chat.
+  //     Rework has no placement step, so chat is always the answer once it
+  //     exists.
+  // Design's back button reads this — Chat and Placement resolve their own
+  // back target deterministically and don't need it. Carries this page's own
+  // ?from= along too, so Design's back leads here, and here's back button
+  // still leads wherever this page itself was originally opened from.
+  const ownUrl = from ? `${pathname}?from=${from}` : pathname;
+  const designFromSuffix = `?from=${encodeURIComponent(ownUrl)}`;
+  const continueUrl =
+    session.flow_type === "direct"
+      ? designs.length > 0 ? `/${session.id}/placement` : `/${session.id}/design${designFromSuffix}`
+      : !hasChatMessages
+      ? `/${session.id}/design${designFromSuffix}`
+      : session.flow_type === "ai_design" && placements.length > 0
+      ? `/${session.id}/placement`
+      : `/${session.id}/chat`;
 
   const finalDesign = designs.find((d) => d.is_finalized);
   // flashUrl (local state) covers a just-finished generation before the
@@ -378,6 +401,11 @@ export default function SessionOverview({ sessionId, from, defaultBackUrl, defau
             {session.flow_type === "rework" && (
               <span className="text-[10px] font-mono font-bold uppercase px-2.5 py-1 rounded-full border border-gold/40 text-gold bg-gold/10">
                 Rework
+              </span>
+            )}
+            {session.flow_type === "direct" && (
+              <span className="text-[10px] font-mono font-bold uppercase px-2.5 py-1 rounded-full border border-gold/40 text-gold bg-gold/10">
+                Uploaded
               </span>
             )}
             <span className={`text-[10px] font-mono font-bold uppercase px-2.5 py-1 rounded-full border ${statusColor}`}>
@@ -568,8 +596,8 @@ export default function SessionOverview({ sessionId, from, defaultBackUrl, defau
         </motion.div>
         )}
 
-        {/* ── 4. Placement (AI Design only — Rework has no placement step) ── */}
-        {session.flow_type === "ai_design" && (
+        {/* ── 4. Placement (AI Design + Upload Existing — Rework has no placement step) ── */}
+        {session.flow_type !== "rework" && (
         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, delay: 0.2 }} className="flex flex-col gap-4">
           <SectionHeader title="Placement" />

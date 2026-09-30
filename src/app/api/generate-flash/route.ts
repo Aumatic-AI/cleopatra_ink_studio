@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
 
   after(async () => {
     try {
-      const taskId = await createKeiTask(FLASH_PROMPT, [imageUrl], { model: "gpt-image-2-image-to-image" });
+      const taskId = await createKeiTask(FLASH_PROMPT, [imageUrl], { model: "nano-banana-pro" });
       const url = await waitForKeiTask(taskId);
       const imageBase64 = await fetchAsBase64(url);
       await setSlot(jobKey, 0, { status: "done", imageBase64 });

@@ -45,6 +45,8 @@ export function resolveBackUrl(
   if (from === "/studio/admin")                return { backUrl: from, backLabel: "Admin" };
   if (from === "/studio/designer")             return { backUrl: from, backLabel: "Dashboard" };
   if (from.startsWith("/studio/admin/designers/")) return { backUrl: from, backLabel: "Designer" };
+  if (from.startsWith("/studio/sessions/"))        return { backUrl: from, backLabel: "Session" };
+  if (from.startsWith("/studio/admin/sessions/"))  return { backUrl: from, backLabel: "Session" };
 
   return { backUrl: defaultUrl, backLabel: defaultLabel };
 }

@@ -59,7 +59,7 @@ interface AppState {
   isTextTattoo: boolean;
 
   // Rework (cover-up/extend) — a session is either "ai_design" or "rework"
-  flowType: "ai_design" | "rework";
+  flowType: "ai_design" | "rework" | "direct";
   reworkMode: "cover" | "extend";
   reworkPhoto: string | null; // the existing-tattoo photo to cover/extend (blob: until generation uploads it)
   // Set right before navigating Design -> Chat; the chat screen consumes it
@@ -88,7 +88,7 @@ interface AppState {
   setTattooStyle: (style: string) => void;
   setTattooDescription: (text: string) => void;
   setTargetBodyArea: (text: string) => void;
-  setFlowType: (type: "ai_design" | "rework") => void;
+  setFlowType: (type: "ai_design" | "rework" | "direct") => void;
   setReworkMode: (mode: "cover" | "extend") => void;
   setReworkPhoto: (url: string | null) => void;
   setPendingGeneration: (pending: boolean) => void;
@@ -136,7 +136,7 @@ const defaultState = {
   targetBodyArea: "",
   textTattooFont: null,
   isTextTattoo: false,
-  flowType: "ai_design" as "ai_design" | "rework",
+  flowType: "ai_design" as "ai_design" | "rework" | "direct",
   reworkMode: "cover" as "cover" | "extend",
   reworkPhoto: null as string | null,
   pendingGeneration: false,
@@ -166,7 +166,7 @@ const freshSessionDesignState = {
   targetBodyArea: "",
   textTattooFont: null,
   isTextTattoo: false,
-  flowType: "ai_design" as "ai_design" | "rework",
+  flowType: "ai_design" as "ai_design" | "rework" | "direct",
   reworkMode: "cover" as "cover" | "extend",
   reworkPhoto: null as string | null,
   pendingGeneration: false,
@@ -545,7 +545,7 @@ export const useAppStore = create<AppState>()(
       tattooStyle: session.tattoo_style ?? "",
       tattooDescription: session.tattoo_description ?? "",
       targetBodyArea: session.target_body_area ?? "",
-      flowType: (session.flow_type as "ai_design" | "rework" | null) ?? "ai_design",
+      flowType: (session.flow_type as "ai_design" | "rework" | "direct" | null) ?? "ai_design",
       reworkMode: (session.rework_mode as "cover" | "extend" | null) ?? "cover",
       generatedDesigns: latestDesigns,
       selectedDesign: finalizedDesign ?? get().selectedDesign ?? latestDesigns[0] ?? null,

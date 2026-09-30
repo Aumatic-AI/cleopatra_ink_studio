@@ -20,8 +20,9 @@ app — staff acts on their behalf.
 - **State:** Zustand with throttled localStorage persistence + Supabase hydration (`src/store/app-store.ts`)
 - **Database & Storage:** Supabase PostgreSQL + Storage bucket `session-assets`
 - **Image generation:** KEI API (`api.kie.ai`) — NOT Claude or DALL·E.
-  - AI Design / Rework: `gpt-image-2-image-to-image`, switching to `nano-banana-pro` (Gemini 3 Pro Image) for Text Tattoo mode and for the Flash/sticker isolate.
-  - Placement: currently `gpt-image-2-image-to-image` (see `src/lib/prompts-test.ts` — an in-progress experiment against the original prompts in `src/lib/prompts.ts`).
+  - AI Design, Rework, and Flash/sticker isolate: `nano-banana-pro` (Gemini 3 Pro Image).
+  - Placement: currently `gpt-image-2-image-to-image`, deliberately — see `src/app/api/placement/route.ts`'s `PLACEMENT_MODEL` comment. `nano-banana-pro` was tried here and rejected: it let the tattoo's position/pose drift instead of strictly preserving the composite, which `gpt-image`'s edit mode handles correctly. Don't switch this one without re-testing that regression first.
+- **Prompt enhancer:** OpenAI GPT-4o-mini (`/api/enhance-prompt`) — kept on GPT deliberately; only image generation moved to Gemini/nano-banana-pro.
 - **Styling:** Tailwind CSS v4. Dark luxury theme: bg `#0D0D0D`, gold `#C9A84C`, font Cinzel.
 
 ---
@@ -98,6 +99,35 @@ which a scheduled job hard-deletes it (see **Retention / Cron Setup**
 below). **Never add a mechanism that hard-deletes sessions outside of
 that documented job** — an earlier, undocumented `pg_cron` job did exactly
 that silently for months; it's why this section exists.
+
+**`flow_type` has three values, not two — `'direct'` is Upload Existing.**
+Every reader of `flow_type` used to assume a binary `ai_design`/`rework`, so
+the Upload Existing path (no AI generation, straight to Placement) silently
+defaulted to `ai_design` — which meant any place that treats "ai_design
+session with a persisted design" as "resume it in Chat" would redirect an
+Upload Existing session there too, landing on an empty, unusable Chat
+screen. `handleProceedDirect` in `design/page.tsx` now writes
+`flow_type: 'direct'` to the session row the moment a design is uploaded.
+Chat's own load effect additionally hard-guards on `flow_type === 'direct'`
+and redirects to Placement — never rely on every other flow_type check
+being correct instead; keep that guard. If you add a fourth flow type,
+audit every `flow_type`/`flowType` reader in the codebase (`grep -rn
+"flow_type\|flowType"`) before assuming a binary check still holds.
+
+**Resuming a session must check what actually happened, not guess from one field.** Two places compute "which screen does Continue/Edit open" —
+`SessionOverview.tsx`'s `continueUrl` and `customer/[userId]/page.tsx`'s
+`resumeUrl()` — and both used to guess from `tattoo_designs.length` alone,
+which is flow-type-blind: it sent every Upload Existing session (which
+always has a design) to Chat, and any AI Design session that had already
+reached Placement back to Chat instead of Placement. The correct rule,
+checked in this order:
+1. `flow_type === 'direct'` → a design exists means Placement, otherwise Design (never Chat — Upload Existing never has one).
+2. No `chat_messages` rows yet → Design/Rework (generation never started).
+3. `flow_type === 'ai_design'` and a `placements` row already exists (finalized or not — existing at all is "furthest point reached") → Placement.
+4. Otherwise → Chat (this is Rework's permanent answer once chat exists, since Rework has no Placement step).
+This only decides the initial landing screen — free navigation between
+Design/Chat/Placement via the app's own back buttons is unrestricted and
+unaffected, for every flow type.
 
 **`designer_id` means "handled by," not "designer-exclusive."** An admin
 who runs a session themself is still recorded as `designer_id`. Don't
@@ -205,7 +235,7 @@ and the session-flow pages are reached by both roles.
 | `auth.users` | Supabase Auth — staff accounts |
 | `staff` | `id`, `email`, `name`, `role` (admin\|designer), `is_active`, `last_login`, `deleted_at`, `trash_last_viewed_at` |
 | `users` | `id`, `first_name`, `phone` — customers (no auth) |
-| `sessions` | `id`, `user_id`, `designer_id` ("handled by," see Architecture Notes), `tattoo_style`, `tattoo_description`, `target_body_area`, `flow_type` (ai_design\|rework), `status` (active\|completed\|abandoned), `deleted_at` |
+| `sessions` | `id`, `user_id`, `designer_id` ("handled by," see Architecture Notes), `tattoo_style`, `tattoo_description`, `target_body_area`, `flow_type` (ai_design\|rework\|direct, see Architecture Notes), `status` (active\|completed\|abandoned), `deleted_at` |
 | `tattoo_designs` | `id`, `session_id`, `image_url`, `style_name`, `pattern_type`, `iteration`, `is_finalized`, `parent_design_ids[]`, `flash_image_url` |
 | `chat_messages` | `id`, `session_id`, `role` (user\|assistant), `content`, `image_urls[]`, `design_ids[]` — the chat screen's source of truth |
 | `placements` | `id`, `session_id`, `placement_text`, `body_photo_url`, `final_composite_url`, `is_finalized` |
@@ -303,7 +333,7 @@ NEXT_PUBLIC_SUPABASE_URL
 NEXT_PUBLIC_SUPABASE_ANON_KEY
 SUPABASE_SERVICE_ROLE_KEY
 KEI_API_KEY
-OPENAI_API_KEY                 # /api/enhance-prompt (GPT-4o-mini description enhancer)
+OPENAI_API_KEY                  # /api/enhance-prompt (GPT-4o-mini description enhancer)
 CRON_SECRET                    # shared secret for the purge-trash cron endpoint
 PINTEREST_APP_ID               # currently unused at runtime — see supabase-schema.sql comment
 PINTEREST_APP_SECRET           # currently unused at runtime — see supabase-schema.sql comment

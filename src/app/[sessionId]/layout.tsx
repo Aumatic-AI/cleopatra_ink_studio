@@ -1,8 +1,12 @@
 "use client";
 
-import { use } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { use, useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useAppStore } from "@/store/app-store";
+import { createSupabaseBrowserClient } from "@/lib/supabase-client";
+import { resolveBackUrl } from "@/lib/auth-utils";
+
+const supabase = createSupabaseBrowserClient();
 
 const AI_DESIGN_STEPS = [
   { label: "Design", path: "design" },
@@ -19,6 +23,7 @@ export default function SessionLayout({
 }) {
   const { sessionId } = use(params);
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const router = useRouter();
   const customerName = useAppStore((s) => s.customerName);
   const flowType = useAppStore((s) => s.flowType);
@@ -28,13 +33,53 @@ export default function SessionLayout({
   const matchPath = pathname.includes("chat") ? "design" : pathname;
   const currentStep = STEPS.findIndex((s) => matchPath.includes(s.path));
   const isPlacement = pathname.includes("placement");
+  const isChat = pathname.includes("chat");
+
+  // Design is step 1, reachable from several different lists (a customer's
+  // page, a dashboard, a session overview) — resolved the same role-checked
+  // way those pages resolve their own back button, from a ?from= param
+  // those lists append when they send someone here. Chat and Placement,
+  // unlike Design, always have one deterministic previous step within this
+  // same flow, so they never need it.
+  const [designBackUrl, setDesignBackUrl] = useState("/studio/designer");
+  const [designBackLabel, setDesignBackLabel] = useState("Dashboard");
+
+  useEffect(() => {
+    if (isPlacement || isChat) return; // only Design's back needs this
+    let cancelled = false;
+    (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data: staffRow } = await supabase.from("staff").select("role").eq("id", user.id).maybeSingle();
+      const role = (staffRow?.role as "admin" | "designer" | undefined) ?? null;
+      const defaultUrl = role === "admin" ? "/studio/admin" : "/studio/designer";
+      const defaultLabel = role === "admin" ? "Admin" : "Dashboard";
+      const resolved = resolveBackUrl(searchParams.get("from"), role, defaultUrl, defaultLabel);
+      if (!cancelled) {
+        setDesignBackUrl(resolved.backUrl);
+        setDesignBackLabel(resolved.backLabel);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isPlacement, isChat, searchParams]);
 
   function handleBack() {
-    // Placement always came from Design in this flow — go there directly.
-    // Design is step 1, so "back" means leaving the flow the way we arrived.
-    if (isPlacement) router.push(`/${sessionId}/design`);
-    else router.back();
+    if (isPlacement) {
+      // AI Design reaches Placement from Chat (a design is picked there);
+      // Upload Existing reaches it directly from Design (no chat at all);
+      // Rework never has a placement step, so it never hits this branch.
+      router.push(flowType === "direct" ? `/${sessionId}/design` : `/${sessionId}/chat`);
+    } else if (isChat) {
+      // Chat is always a sub-screen of Design — one deterministic step back,
+      // regardless of how this session's Chat screen was originally reached.
+      router.push(`/${sessionId}/design`);
+    } else {
+      // Design (step 1) — leaving the flow entirely, back to wherever sent us.
+      router.push(designBackUrl);
+    }
   }
+
+  const backLabel = !isPlacement && !isChat ? designBackLabel : "Back";
 
   return (
     <div className="min-h-screen bg-bg flex flex-col">
@@ -49,7 +94,7 @@ export default function SessionLayout({
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
           </svg>
-          <span className="hidden sm:block text-xs font-mono tracking-wider">Back</span>
+          <span className="hidden sm:block text-xs font-mono tracking-wider">{backLabel}</span>
         </button>
 
         <div className="w-px h-5 bg-cleo-border flex-shrink-0" />

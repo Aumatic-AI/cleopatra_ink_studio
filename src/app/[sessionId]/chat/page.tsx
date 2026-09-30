@@ -72,7 +72,7 @@ function ChatInner({ sessionId }: { sessionId: string }) {
   // Authoritative session context — read from the DB, not just the in-memory
   // store, so reopening a session later (e.g. "Continue Design" from history)
   // still shows correct chips even if the store has a different session loaded.
-  const [sessionFlowType, setSessionFlowType] = useState<"ai_design" | "rework">(flowType);
+  const [sessionFlowType, setSessionFlowType] = useState<"ai_design" | "rework" | "direct">(flowType);
   const [sessionReworkMode, setSessionReworkMode] = useState<"cover" | "extend">(reworkMode);
   const [sessionStyle, setSessionStyle] = useState(tattooStyle);
 
@@ -156,8 +156,19 @@ function ChatInner({ sessionId }: { sessionId: string }) {
         .select("flow_type, rework_mode, tattoo_style")
         .eq("id", sessionId)
         .maybeSingle();
+
+      // Upload Existing sessions have nothing for Chat to show — there was
+      // never a generation to refine. This is a hard backstop independent
+      // of how the redirect got skipped elsewhere (a stale flow_type from
+      // before this guard existed, a future bug, a direct URL visit, etc.)
+      // — Chat must never render for one of these, full stop.
+      if (session?.flow_type === "direct") {
+        if (!cancelled) router.replace(`/${sessionId}/placement`);
+        return;
+      }
+
       if (!cancelled && session) {
-        setSessionFlowType((session.flow_type as "ai_design" | "rework" | null) ?? flowType);
+        setSessionFlowType((session.flow_type as "ai_design" | "rework" | "direct" | null) ?? flowType);
         setSessionReworkMode((session.rework_mode as "cover" | "extend" | null) ?? reworkMode);
         setSessionStyle(session.tattoo_style ?? tattooStyle);
       }

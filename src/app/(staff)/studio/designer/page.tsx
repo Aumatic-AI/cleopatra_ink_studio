@@ -165,7 +165,7 @@ export default function DesignerDashboard() {
     if (!selectedCustomer) return;
     setStarting(true);
     const sessionId = await startSessionForUser(selectedCustomer.id, selectedCustomer.first_name, selectedCustomer.phone);
-    router.push(`/${sessionId}/design`);
+    router.push(`/${sessionId}/design?from=/studio/designer`);
   }
 
   async function handleCreateNew(e: React.FormEvent) {
@@ -178,7 +178,7 @@ export default function DesignerDashboard() {
       // Existing user detected mid-flow — go to their dashboard
       router.push(`/customer/${userId}`);
     } else if (sessionId) {
-      router.push(`/${sessionId}/design`);
+      router.push(`/${sessionId}/design?from=/studio/designer`);
     }
   }
 

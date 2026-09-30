@@ -51,7 +51,7 @@ interface CompletedSession {
   id: string;
   tattoo_style: string | null;
   tattoo_description: string | null;
-  flow_type: "ai_design" | "rework";
+  flow_type: "ai_design" | "rework" | "direct";
   completed_at: string;
   design: { image_url: string; style_name: string | null } | null;
   placement: { placement_text: string | null; final_composite_url: string | null } | null;
@@ -60,14 +60,32 @@ interface CompletedSession {
   sourcePhoto: string | null;
 }
 
-type HistoryFilter = "all" | "ai_design" | "rework";
+type HistoryFilter = "all" | "ai_design" | "rework" | "direct";
 
 interface ActiveSession {
   id: string;
   tattoo_style: string | null;
   tattoo_description: string | null;
   created_at: string;
+  flow_type: "ai_design" | "rework" | "direct";
   hasDesign: boolean;
+  hasChatMessages: boolean;
+  hasPlacement: boolean;
+}
+
+// Resume at whichever screen the session actually got to — see the matching
+// (and more heavily commented) version of this logic in SessionOverview.tsx.
+// `from` is only consumed by the Design page's own back button (Chat and
+// Placement resolve their back target deterministically) — harmless to pass
+// along regardless of which of the three this resolves to.
+function resumeUrl(session: ActiveSession, from: string): string {
+  const suffix = `?from=${encodeURIComponent(from)}`;
+  if (session.flow_type === "direct") {
+    return session.hasDesign ? `/${session.id}/placement` : `/${session.id}/design${suffix}`;
+  }
+  if (!session.hasChatMessages) return `/${session.id}/design${suffix}`;
+  if (session.flow_type === "ai_design" && session.hasPlacement) return `/${session.id}/placement`;
+  return `/${session.id}/chat`;
 }
 
 function CustomerDetailSkeleton() {
@@ -178,7 +196,7 @@ function CustomerDashboardInner() {
           .order("completed_at", { ascending: false }),
         supabase
           .from("sessions")
-          .select("id, tattoo_style, tattoo_description, created_at, tattoo_designs(id)")
+          .select("id, tattoo_style, tattoo_description, created_at, flow_type, tattoo_designs(id), chat_messages(id), placements(id)")
           .eq("user_id", userId)
           .eq("status", "active")
           .is("deleted_at", null)
@@ -239,7 +257,10 @@ function CustomerDashboardInner() {
           tattoo_style: s.tattoo_style,
           tattoo_description: s.tattoo_description,
           created_at: s.created_at,
+          flow_type: s.flow_type ?? "ai_design",
           hasDesign: Array.isArray(s.tattoo_designs) ? s.tattoo_designs.length > 0 : !!s.tattoo_designs,
+          hasChatMessages: Array.isArray(s.chat_messages) ? s.chat_messages.length > 0 : !!s.chat_messages,
+          hasPlacement: Array.isArray(s.placements) ? s.placements.length > 0 : !!s.placements,
         }));
         setActiveSessions(mappedActive);
       }
@@ -254,7 +275,7 @@ function CustomerDashboardInner() {
     if (!profile) return;
     setStartingSession(true);
     const sessionId = await startSessionForUser(userId, profile.first_name, profile.phone);
-    router.push(`/${sessionId}/design`);
+    router.push(`/${sessionId}/design?from=${encodeURIComponent(`/customer/${userId}`)}`);
   }
 
   function openEditProfile() {
@@ -433,7 +454,7 @@ function CustomerDashboardInner() {
             </div>
             <div className="flex flex-col gap-2">
               {activeSessions.map((session, i) => {
-                const continueUrl = session.hasDesign ? `/${session.id}/placement` : `/${session.id}/design`;
+                const continueUrl = resumeUrl(session, `/customer/${userId}`);
                 const dateLabel = new Date(session.created_at).toLocaleDateString("en-US", {
                   year: "numeric", month: "short", day: "numeric",
                 });
@@ -476,6 +497,7 @@ function CustomerDashboardInner() {
                 options={[
                   { value: "all", label: "All" },
                   { value: "ai_design", label: "AI Design" },
+                  { value: "direct", label: "Uploaded" },
                   { value: "rework", label: "Rework" },
                 ]}
                 value={historyFilter}
@@ -490,9 +512,10 @@ function CustomerDashboardInner() {
               : sessions.filter((s) => s.flow_type === historyFilter);
 
             if (sessions.length > 0 && filteredSessions.length === 0) {
+              const filterLabel = historyFilter === "ai_design" ? "AI Design" : historyFilter === "direct" ? "Uploaded" : "Rework";
               return (
                 <div className="bg-surface border border-cleo-border rounded-2xl p-8 text-center">
-                  <p className="text-muted text-sm">No {historyFilter === "ai_design" ? "AI Design" : "Rework"} sessions yet.</p>
+                  <p className="text-muted text-sm">No {filterLabel} sessions yet.</p>
                 </div>
               );
             }
@@ -569,6 +592,11 @@ function CustomerDashboardInner() {
                             {isRework && (
                               <span className="text-[9px] font-mono uppercase tracking-wider bg-gold/10 text-gold border border-gold/30 px-1.5 py-0.5 rounded-full flex-shrink-0">
                                 Rework
+                              </span>
+                            )}
+                            {session.flow_type === "direct" && (
+                              <span className="text-[9px] font-mono uppercase tracking-wider bg-gold/10 text-gold border border-gold/30 px-1.5 py-0.5 rounded-full flex-shrink-0">
+                                Uploaded
                               </span>
                             )}
                           </div>

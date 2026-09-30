@@ -22,7 +22,7 @@ type RunResult =
 async function runOneTask(prompt: string, inputUrls: string[]): Promise<RunResult> {
   let taskId: string | undefined;
   try {
-    taskId = await createKeiTask(prompt, inputUrls, { model: "gpt-image-2-image-to-image" });
+    taskId = await createKeiTask(prompt, inputUrls, { model: "nano-banana-pro" });
     const url = await waitForKeiTask(taskId);
     return { ok: true, url };
   } catch (err) {

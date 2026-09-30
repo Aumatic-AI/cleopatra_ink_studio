@@ -74,7 +74,7 @@ create table sessions (
   tattoo_description     text,
   target_body_area       text,
   flow_type              text        not null default 'ai_design'
-                           check (flow_type in ('ai_design', 'rework')),
+                           check (flow_type in ('ai_design', 'rework', 'direct')),
   rework_source_photo_url text,
   rework_mode            text        check (rework_mode in ('cover', 'extend')),
   status                 text        not null default 'active'
