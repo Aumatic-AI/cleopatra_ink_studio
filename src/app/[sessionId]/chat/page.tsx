@@ -4,10 +4,12 @@ import { Suspense, use, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 import { useAppStore } from "@/store/app-store";
+import type { ModelChoice } from "@/store/app-store";
 import { createSupabaseBrowserClient } from "@/lib/supabase-client";
 import { resolveImageSrc } from "@/lib/image-src";
 import { uploadPhotoDirect, uploadBase64Direct } from "@/lib/browser-upload";
 import { startFlashGeneration } from "@/lib/flash-generation";
+import { getModelLabel } from "@/lib/model-labels";
 
 const supabase = createSupabaseBrowserClient();
 
@@ -25,6 +27,7 @@ interface JobSlot {
   imageBase64?: string;
   reason?: string;
   code?: string;
+  model?: string;
 }
 
 // Local, per-message render state for one image slot in an in-flight batch.
@@ -41,6 +44,7 @@ interface LastRequest {
   instructionForTurn: string;
   referenceUrls: string[];
   thisCount: number;
+  modelChoice: ModelChoice;
 }
 
 const COUNT_OPTIONS = [1, 2, 3, 4, 5] as const;
@@ -62,12 +66,29 @@ function ChatInner({ sessionId }: { sessionId: string }) {
     tattooStyle, tattooDescription, targetBodyArea, selectedColors, referenceImages,
     isTextTattoo, textTattooFont,
     pendingGeneration, setPendingGeneration,
+    initialGenerationModel,
     persistDesigns, selectDesign, finalizeReworkSession,
   } = useAppStore();
 
   const [loading, setLoading] = useState(true);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [finalizedIds, setFinalizedIds] = useState<Set<string>>(new Set());
+  // Which model made each design — for the tag shown when viewing an image.
+  const [designModelById, setDesignModelById] = useState<Record<string, string>>({});
+  // Assistant messages that came back from the DB with zero images and
+  // aren't the job currently being resumed — a batch that failed entirely
+  // (every slot errored) has no persisted trace of that failure (error
+  // state only ever lived in local pendingSlots), so on reload it would
+  // otherwise render as a silent, empty gap with no way to tell what
+  // happened or retry it. Flagged here instead so it always renders a real
+  // "this failed, please resend" notice.
+  const [deadMessageIds, setDeadMessageIds] = useState<Set<string>>(new Set());
+  // Chat's own model choice for refinements — two-way only, no "both": one
+  // small batch isn't worth splitting between models the way a fresh
+  // 5-image batch is. Starts on whichever model won the first batch.
+  const [refinementModel, setRefinementModel] = useState<Exclude<ModelChoice, "both">>(
+    initialGenerationModel === "both" ? "nano-banana-pro" : initialGenerationModel
+  );
   const [finalizeToast, setFinalizeToast] = useState(false);
   // Authoritative session context — read from the DB, not just the in-memory
   // store, so reopening a session later (e.g. "Continue Design" from history)
@@ -80,6 +101,7 @@ function ChatInner({ sessionId }: { sessionId: string }) {
   const [instruction, setInstruction] = useState("");
   const [count, setCount] = useState(2);
   const [isCountOpen, setIsCountOpen] = useState(false);
+  const [isModelOpen, setIsModelOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [pendingSlots, setPendingSlots] = useState<Record<string, PendingSlot[]>>({});
   const [error, setError] = useState<string | null>(null);
@@ -94,7 +116,14 @@ function ChatInner({ sessionId }: { sessionId: string }) {
   const didKickoffRef = useRef(false);
   const threadEndRef = useRef<HTMLDivElement>(null);
   const processedSlotsRef = useRef<Set<number>>(new Set());
+  // A ref, not state: two Retry clicks fired close together (e.g. on two of
+  // five failed tiles in the same batch) can both read `sending` as stale
+  // `false` before React re-renders to disable/hide the buttons, since state
+  // reads go through the render cycle. A ref is read fresh, synchronously,
+  // every time — the only way to actually close that race.
+  const isGeneratingRef = useRef(false);
   const countRef = useRef<HTMLDivElement>(null);
+  const modelRef = useRef<HTMLDivElement>(null);
   // Keyed by assistant message id so a Retry always redoes the right request,
   // even if the user has since sent a newer message.
   const lastRequestByMessage = useRef<Record<string, LastRequest>>({});
@@ -102,6 +131,7 @@ function ChatInner({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (countRef.current && !countRef.current.contains(e.target as Node)) setIsCountOpen(false);
+      if (modelRef.current && !modelRef.current.contains(e.target as Node)) setIsModelOpen(false);
     }
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
@@ -113,6 +143,55 @@ function ChatInner({ sessionId }: { sessionId: string }) {
       if (idx !== -1) return m.image_urls[idx];
     }
     return undefined;
+  }
+
+  // Reverse of findImageUrl — recovers a design's id from its url. Needed to
+  // rebuild a lost request's editSourceIds (see reconstructRequest): the
+  // persisted user message only kept the resolved urls, not the ids.
+  function findDesignIdByUrl(url: string): string | undefined {
+    for (const m of messages) {
+      const idx = m.image_urls.indexOf(url);
+      if (idx !== -1 && m.design_ids[idx]) return m.design_ids[idx];
+    }
+    return undefined;
+  }
+
+  // lastRequestByMessage only lives in memory — gone after a reload. Rebuild
+  // an equivalent request from what's actually persisted: the paired user
+  // message (content = instruction, image_urls = the reference/edit-source
+  // urls) plus, for a refinement, a reverse lookup back to those urls'
+  // design ids. thisCount and modelChoice weren't persisted anywhere for a
+  // batch that never produced a design, so those fall back to the current
+  // composer state rather than the (lost) original values.
+  function reconstructRequest(assistantMessageId: string): LastRequest | null {
+    const idx = messages.findIndex((m) => m.id === assistantMessageId);
+    if (idx <= 0) return null;
+    const userMsg = messages[idx - 1];
+    if (userMsg.role !== "user") return null;
+
+    // Not "is this array position 0" — a session can have several dead,
+    // reference-photo-only attempts stacked up (e.g. retrying a batch that
+    // failed before anything ever generated), one after another. As long as
+    // nothing before this point ever produced a real design, this is still,
+    // semantically, a first-ever generation — it needs the actual uploaded
+    // reference photos, not an edit-source lookup that can only ever find
+    // designs, which don't exist yet. Get this wrong and the real reference
+    // photos get silently dropped, and the server correctly rejects the
+    // request as having none.
+    const isFirst = !messages.slice(0, idx).some((m) => m.design_ids.length > 0);
+    const referenceUrls = userMsg.image_urls;
+    const editSourceIds = isFirst
+      ? []
+      : referenceUrls.map(findDesignIdByUrl).filter((id): id is string => !!id);
+
+    return {
+      isFirst,
+      editSourceIds,
+      instructionForTurn: userMsg.content ?? "",
+      referenceUrls,
+      thisCount: isFirst ? 5 : count,
+      modelChoice: isFirst ? initialGenerationModel : refinementModel,
+    };
   }
 
   // Every design image across the whole chat thread, in the order they
@@ -175,14 +254,23 @@ function ChatInner({ sessionId }: { sessionId: string }) {
 
       const [chatRes, designsRes] = await Promise.all([
         supabase.from("chat_messages").select("id, role, content, image_urls, design_ids, created_at").eq("session_id", sessionId).order("created_at", { ascending: true }),
-        supabase.from("tattoo_designs").select("id, is_finalized").eq("session_id", sessionId),
+        supabase.from("tattoo_designs").select("id, is_finalized, generation_model").eq("session_id", sessionId),
       ]);
 
       if (cancelled) return;
 
       const loadedMessages: ChatMessage[] = chatRes.data ?? [];
       setMessages(loadedMessages);
+      // Superseded below if the resume-check further down finds this is
+      // actually still an active job — that branch populates real
+      // pendingSlots for it, which the render takes over this flag.
+      setDeadMessageIds(new Set(
+        loadedMessages.filter((m) => m.role === "assistant" && m.image_urls.length === 0 && m.design_ids.length === 0).map((m) => m.id)
+      ));
       setFinalizedIds(new Set((designsRes.data ?? []).filter((d) => d.is_finalized).map((d) => d.id)));
+      setDesignModelById(Object.fromEntries(
+        (designsRes.data ?? []).filter((d) => d.generation_model).map((d) => [d.id, d.generation_model as string])
+      ));
       setLoading(false);
 
       if (editTargetId) {
@@ -224,6 +312,7 @@ function ChatInner({ sessionId }: { sessionId: string }) {
                 : { status: "loading" }
             ),
           }));
+          isGeneratingRef.current = true;
           setSending(true);
           watchJob(lastMessage.id, status.iteration!);
         }
@@ -316,7 +405,7 @@ function ChatInner({ sessionId }: { sessionId: string }) {
         try {
           const imageUrl = await uploadBase64Direct(slot.imageBase64, sessionId, prefix);
           const [persisted] = await persistDesigns(
-            [{ id: `kei-${iteration}-${i}`, imageUrl, gradient: "", patternType: "mandala", styleName: `Variation ${i + 1}` }],
+            [{ id: `kei-${iteration}-${i}`, imageUrl, gradient: "", patternType: "mandala", styleName: `Variation ${i + 1}`, model: slot.model }],
             { iteration }
           );
           const designId = persisted.dbId ?? persisted.id;
@@ -325,6 +414,7 @@ function ChatInner({ sessionId }: { sessionId: string }) {
 
           await supabase.from("chat_messages").update({ image_urls: imageUrls, design_ids: designIds }).eq("id", assistantMessageId);
           setMessages((prev) => prev.map((m) => (m.id === assistantMessageId ? { ...m, image_urls: [...imageUrls], design_ids: [...designIds] } : m)));
+          if (slot.model) setDesignModelById((prev) => ({ ...prev, [designId]: slot.model! }));
           setSlot(assistantMessageId, i, { status: "done" });
         } catch (err) {
           setSlot(assistantMessageId, i, { status: "error", reason: `Failed to save: ${(err as Error).message}` });
@@ -335,49 +425,73 @@ function ChatInner({ sessionId }: { sessionId: string }) {
       await sleep(POLL_INTERVAL_MS);
     }
 
+    isGeneratingRef.current = false;
     setSending(false);
   }
 
   // ── Core: create the message pair, kick off the job, watch it. Shared by
-  // a fresh send and a Retry (which reuses everything but the count). ──
-  async function runGeneration(req: LastRequest) {
-    const { isFirst, editSourceIds, instructionForTurn, referenceUrls, thisCount } = req;
+  // a fresh send and a Retry. `retryMessageId` — when set — means reuse
+  // that exact assistant message (and its already-persisted paired user
+  // message) instead of inserting a new pair, and only request as many
+  // images as are still missing from it, so a partial success (some slots
+  // done, some errored) doesn't end up with the done ones duplicated
+  // alongside a whole second fresh batch. ──
+  async function runGeneration(req: LastRequest, retryMessageId?: string) {
+    // Hard stop against firing a second batch while one is already in
+    // flight — see isGeneratingRef's own comment for why this has to be a
+    // ref check, not a `sending` state check.
+    if (isGeneratingRef.current) return;
+    isGeneratingRef.current = true;
+    const { isFirst, editSourceIds, instructionForTurn, referenceUrls, thisCount, modelChoice } = req;
     setSending(true);
     setError(null);
     processedSlotsRef.current = new Set();
 
     const editSourceUrls = editSourceIds.map(findImageUrl).filter((u): u is string => !!u);
-    const iteration = messages.filter((m) => m.role === "assistant").length + 1;
+    const alreadyDoneCount = retryMessageId
+      ? (messages.find((m) => m.id === retryMessageId)?.design_ids.length ?? 0)
+      : 0;
+    const countToRequest = Math.max(1, thisCount - alreadyDoneCount);
+    const iteration = retryMessageId
+      ? messages.filter((m) => m.role === "assistant").findIndex((m) => m.id === retryMessageId) + 1
+      : messages.filter((m) => m.role === "assistant").length + 1;
 
-    let assistantMsgId: string | null = null;
+    let assistantMsgId: string | null = retryMessageId ?? null;
     try {
-      const { data: userMsg, error: userMsgErr } = await supabase
-        .from("chat_messages")
-        .insert({ session_id: sessionId, role: "user", content: instructionForTurn, image_urls: referenceUrls })
-        .select()
-        .single();
-      if (userMsgErr) throw new Error(`Couldn't save your message: ${userMsgErr.message}`);
+      let targetAssistantId: string;
+      if (retryMessageId) {
+        targetAssistantId = retryMessageId;
+      } else {
+        const { data: userMsg, error: userMsgErr } = await supabase
+          .from("chat_messages")
+          .insert({ session_id: sessionId, role: "user", content: instructionForTurn, image_urls: referenceUrls })
+          .select()
+          .single();
+        if (userMsgErr) throw new Error(`Couldn't save your message: ${userMsgErr.message}`);
 
-      const { data: assistantMsg, error: assistantMsgErr } = await supabase
-        .from("chat_messages")
-        .insert({ session_id: sessionId, role: "assistant", content: null, image_urls: [], design_ids: [] })
-        .select()
-        .single();
-      if (assistantMsgErr) throw new Error(`Couldn't start the reply: ${assistantMsgErr.message}`);
+        const { data: assistantMsg, error: assistantMsgErr } = await supabase
+          .from("chat_messages")
+          .insert({ session_id: sessionId, role: "assistant", content: null, image_urls: [], design_ids: [] })
+          .select()
+          .single();
+        if (assistantMsgErr) throw new Error(`Couldn't start the reply: ${assistantMsgErr.message}`);
 
-      const newAssistantMsgId: string = assistantMsg.id;
-      assistantMsgId = newAssistantMsgId;
-      lastRequestByMessage.current[newAssistantMsgId] = req;
-      setMessages((prev) => [...prev, userMsg as ChatMessage, assistantMsg as ChatMessage]);
-      setPendingSlots((prev) => ({ ...prev, [newAssistantMsgId]: Array.from({ length: thisCount }, () => ({ status: "loading" as const })) }));
+        targetAssistantId = assistantMsg.id;
+        setMessages((prev) => [...prev, userMsg as ChatMessage, assistantMsg as ChatMessage]);
+      }
+
+      assistantMsgId = targetAssistantId;
+      lastRequestByMessage.current[targetAssistantId] = req;
+      setPendingSlots((prev) => ({ ...prev, [targetAssistantId]: Array.from({ length: countToRequest }, () => ({ status: "loading" as const })) }));
       setSelectedIds(new Set());
       setInstruction("");
 
       let res: Response;
       if (sessionFlowType === "rework") {
         const body: Record<string, unknown> = {
-          sessionId, iteration, mode: sessionReworkMode, count: thisCount,
+          sessionId, iteration, mode: sessionReworkMode, count: countToRequest,
           parentDesignIds: isFirst ? [] : editSourceIds,
+          modelChoice,
         };
         if (isFirst) {
           body.description = instructionForTurn;
@@ -393,8 +507,9 @@ function ChatInner({ sessionId }: { sessionId: string }) {
         const body: Record<string, unknown> = {
           sessionId, iteration, description: instructionForTurn, style: sessionStyle,
           images: [], referenceImageUrls: isFirst ? referenceUrls : [],
-          isTextTattoo, colors: selectedColors, targetBodyArea, count: thisCount,
+          isTextTattoo, colors: selectedColors, targetBodyArea, count: countToRequest,
           parentDesignIds: isFirst ? [] : editSourceIds,
+          modelChoice,
           ...(isTextTattoo && textTattooFont ? { textTattooFont } : {}),
         };
         if (!isFirst) {
@@ -412,13 +527,14 @@ function ChatInner({ sessionId }: { sessionId: string }) {
         throw new Error(json.error ?? "Generation failed to start");
       }
 
-      await watchJob(newAssistantMsgId, iteration);
+      await watchJob(targetAssistantId, iteration);
     } catch (err) {
       // The request never got a job running — every slot for this message
       // is unrecoverable without a retry, so mark them all as errored
       // instead of leaving them (or an empty gap) stuck on "loading".
       setError((err as Error).message);
       if (assistantMsgId) failAllLoading(assistantMsgId, (err as Error).message);
+      isGeneratingRef.current = false;
       setSending(false);
     }
   }
@@ -448,7 +564,10 @@ function ChatInner({ sessionId }: { sessionId: string }) {
         referenceUrls = editSourceUrls;
       }
 
-      await runGeneration({ isFirst, editSourceIds, instructionForTurn, referenceUrls, thisCount });
+      // The very first batch uses whatever was chosen on the Design page;
+      // every refinement after that uses Chat's own two-option choice.
+      const modelChoice: ModelChoice = isFirst ? initialGenerationModel : refinementModel;
+      await runGeneration({ isFirst, editSourceIds, instructionForTurn, referenceUrls, thisCount, modelChoice });
     } catch (err) {
       // Failed before a message even existed to attach an error tile to
       // (e.g. the reference photo itself failed to upload) — the banner is
@@ -460,13 +579,18 @@ function ChatInner({ sessionId }: { sessionId: string }) {
 
   // ── Retry: redo the exact same request that produced this message,
   // reusing its already-uploaded reference photo(s) so nothing re-uploads.
+  // Reuses this exact message pair (see runGeneration's retryMessageId) —
+  // it must never insert a second user+assistant pair for the same attempt.
   function retryGeneration(assistantMessageId: string) {
-    const req = lastRequestByMessage.current[assistantMessageId];
+    // The exact original request if this is the same session visit it was
+    // sent in; otherwise (e.g. after a reload) rebuilt from what's actually
+    // persisted — see reconstructRequest's own comment.
+    const req = lastRequestByMessage.current[assistantMessageId] ?? reconstructRequest(assistantMessageId);
     if (!req) {
       setError("Can't retry this automatically — please send a new message instead.");
       return;
     }
-    runGeneration(req);
+    runGeneration(req, assistantMessageId);
   }
 
   function toggleSelect(id: string) {
@@ -531,6 +655,13 @@ function ChatInner({ sessionId }: { sessionId: string }) {
   const viewingSiblings = viewingId ? allDesignIds() : [];
   const viewingSiblingIndex = viewingId ? viewingSiblings.indexOf(viewingId) : -1;
 
+  // Sequential number across the whole thread (1, 2, 3…), not per-batch —
+  // purely a display convenience so staff can say "image 6 is the one" and
+  // mean it regardless of which generation it came from. Computed fresh on
+  // every render from what's already loaded; never persisted anywhere.
+  const designNumberById: Record<string, number> = {};
+  allDesignIds().forEach((id, i) => { designNumberById[id] = i + 1; });
+
   return (
     <div className="relative flex flex-col h-[calc(100vh-57px)]">
       {/* Finalize confirmation — non-blocking, stays in chat so the studio
@@ -584,12 +715,33 @@ function ChatInner({ sessionId }: { sessionId: string }) {
                 {msg.content && <p className="text-ink text-sm leading-relaxed">{msg.content}</p>}
               </div>
             </div>
+          ) : msg.design_ids.length === 0 && (pendingSlots[msg.id] ?? []).length === 0 && deadMessageIds.has(msg.id) ? (
+            // Every slot failed and no trace of that survived a reload (see
+            // deadMessageIds' own comment) — an honest notice with a real
+            // retry instead of a silent empty gap with no way to tell what
+            // happened. Retry rebuilds the request from the paired user
+            // message since the original is long gone from memory (see
+            // reconstructRequest).
+            <div key={msg.id} className="max-w-md rounded-xl border border-error/40 bg-error/5 px-4 py-3 flex flex-col gap-2">
+              <p className="text-error text-xs font-mono leading-relaxed">
+                This generation failed and couldn&apos;t be recovered after a reload.
+              </p>
+              {!sending && (
+                <button
+                  onClick={() => retryGeneration(msg.id)}
+                  className="self-start text-[10px] font-mono uppercase tracking-wider text-gold hover:text-gold-light underline underline-offset-2 cursor-pointer"
+                >
+                  ⟳ Retry
+                </button>
+              )}
+            </div>
           ) : (
             <div key={msg.id} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 sm:gap-3 max-w-3xl">
               {msg.design_ids.map((designId, i) => {
                 const url = msg.image_urls[i];
                 const isSelected = selectedIds.has(designId);
                 const isFinalized = finalizedIds.has(designId);
+                const modelLabel = getModelLabel(designModelById[designId]);
                 return (
                   <div
                     key={designId}
@@ -620,6 +772,14 @@ function ChatInner({ sessionId }: { sessionId: string }) {
                       </div>
                     )}
 
+                    {modelLabel && (
+                      <div className="absolute top-1.5 right-1.5">
+                        <span className="text-[8px] font-mono uppercase tracking-wider bg-black/70 backdrop-blur-sm text-gold px-1.5 py-0.5 rounded-full border border-gold/20">
+                          {modelLabel}
+                        </span>
+                      </div>
+                    )}
+
                     <button
                       onClick={(e) => { e.stopPropagation(); requestUse(designId, url); }}
                       disabled={finalizing === designId}
@@ -627,6 +787,17 @@ function ChatInner({ sessionId }: { sessionId: string }) {
                     >
                       {finalizing === designId ? "Finalizing…" : "✦ Finalize"}
                     </button>
+
+                    {/* Sequential image number across the whole thread — z-20
+                        so it stays visible over the Finalize bar on hover.
+                        Solid gold fill (not the dark/gold-text style used
+                        elsewhere) so it reads clearly at a glance over any
+                        image, light or dark. */}
+                    <div className="absolute bottom-1.5 left-1.5 z-20">
+                      <span className="w-6 h-6 rounded-full bg-gold text-bg text-[11px] font-mono font-bold flex items-center justify-center shadow-[0_1px_4px_rgba(0,0,0,0.6)]">
+                        {designNumberById[designId]}
+                      </span>
+                    </div>
                   </div>
                 );
               })}
@@ -702,62 +873,97 @@ function ChatInner({ sessionId }: { sessionId: string }) {
               })}
             </div>
           )}
-          <div className="flex items-center gap-2">
-            <div className="flex-1 h-11 flex items-center bg-bg border border-cleo-border rounded-xl px-3.5 focus-within:border-gold transition-colors">
-              <textarea
-                rows={1}
-                value={instruction}
-                onChange={(e) => setInstruction(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                placeholder={selectedIds.size === 0 ? "Select an image above, then describe your change…" : "e.g. Make the mane fuller, remove the small stars…"}
-                className="focus-ring-none w-full bg-transparent text-ink text-sm placeholder:text-muted/50 focus:outline-none resize-none leading-normal py-0"
-              />
-            </div>
+          {/* Input on its own line, full width — controls dock in a row
+              below it instead of squeezing into the same line. */}
+          <textarea
+            rows={2}
+            value={instruction}
+            onChange={(e) => setInstruction(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+            placeholder={selectedIds.size === 0 ? "Select an image above, then describe your change…" : "e.g. Make the mane fuller, remove the small stars…"}
+            className="focus-ring-none w-full bg-transparent text-ink text-sm placeholder:text-muted/50 focus:outline-none resize-none leading-relaxed px-1"
+          />
 
-            {/* Image-count dropdown */}
-            <div ref={countRef} className="relative flex-shrink-0">
-              <button
-                type="button"
-                onClick={() => setIsCountOpen((v) => !v)}
-                className="h-11 px-3 rounded-xl bg-bg border border-cleo-border hover:border-gold/50 text-ink flex items-center gap-1.5 transition-colors cursor-pointer"
-                title="Number of images to generate"
-              >
-                <svg className="w-4 h-4 text-gold" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-                  <rect x="3" y="5" width="14" height="14" rx="2" />
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M7 9a1 1 0 100-2 1 1 0 000 2zm0 8l3.5-4.5 2.5 3L16 11l4 6" />
-                </svg>
-                <span className="text-sm font-mono font-bold">{count}</span>
-                <svg className={`w-3 h-3 text-muted transition-transform ${isCountOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-              {isCountOpen && (
-                <div className="absolute bottom-full mb-2 right-0 bg-surface-2 border border-cleo-border rounded-xl shadow-2xl overflow-hidden z-10 min-w-[7rem]">
-                  <p className="px-3 pt-2.5 pb-1.5 text-[9px] font-mono uppercase tracking-widest text-muted/60 border-b border-cleo-border">Images to Generate</p>
-                  {COUNT_OPTIONS.map((n) => (
-                    <button
-                      key={n}
-                      onClick={() => { setCount(n); setIsCountOpen(false); }}
-                      className={`w-full text-left px-3 py-2 text-sm font-mono transition-colors cursor-pointer hover:bg-gold/10 ${
-                        count === n ? "text-gold font-bold bg-gold/5" : "text-ink"
-                      }`}
-                    >
-                      {n} image{n === 1 ? "" : "s"}
-                    </button>
-                  ))}
-                </div>
-              )}
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              {/* Model dropdown — which model this refinement uses (no
+                  "both" here; a small edit batch isn't worth splitting
+                  between models the way a fresh 5-image batch is). */}
+              <div ref={modelRef} className="relative flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setIsModelOpen((v) => !v)}
+                  className="h-9 px-3 rounded-lg bg-bg border border-cleo-border hover:border-gold/50 text-ink flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Model used for this refinement"
+                >
+                  <span className="text-[11px] font-mono font-bold">{getModelLabel(refinementModel)}</span>
+                  <svg className={`w-3 h-3 text-muted transition-transform ${isModelOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {isModelOpen && (
+                  <div className="absolute bottom-full mb-2 left-0 bg-surface-2 border border-cleo-border rounded-xl shadow-2xl overflow-hidden z-10 min-w-[10rem]">
+                    <p className="px-3 pt-2.5 pb-1.5 text-[9px] font-mono uppercase tracking-widest text-muted/60 border-b border-cleo-border">Model</p>
+                    {(["nano-banana-pro", "gpt-image-2-image-to-image"] as const).map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => { setRefinementModel(m); setIsModelOpen(false); }}
+                        className={`w-full text-left px-3 py-2 text-sm font-mono transition-colors cursor-pointer hover:bg-gold/10 ${
+                          refinementModel === m ? "text-gold font-bold bg-gold/5" : "text-ink"
+                        }`}
+                      >
+                        {getModelLabel(m)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Image-count dropdown */}
+              <div ref={countRef} className="relative flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setIsCountOpen((v) => !v)}
+                  className="h-9 px-3 rounded-lg bg-bg border border-cleo-border hover:border-gold/50 text-ink flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Number of images to generate"
+                >
+                  <svg className="w-4 h-4 text-gold" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                    <rect x="3" y="5" width="14" height="14" rx="2" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 9a1 1 0 100-2 1 1 0 000 2zm0 8l3.5-4.5 2.5 3L16 11l4 6" />
+                  </svg>
+                  <span className="text-sm font-mono font-bold">{count}</span>
+                  <svg className={`w-3 h-3 text-muted transition-transform ${isCountOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {isCountOpen && (
+                  <div className="absolute bottom-full mb-2 left-0 bg-surface-2 border border-cleo-border rounded-xl shadow-2xl overflow-hidden z-10 min-w-[7rem]">
+                    <p className="px-3 pt-2.5 pb-1.5 text-[9px] font-mono uppercase tracking-widest text-muted/60 border-b border-cleo-border">Images to Generate</p>
+                    {COUNT_OPTIONS.map((n) => (
+                      <button
+                        key={n}
+                        onClick={() => { setCount(n); setIsCountOpen(false); }}
+                        className={`w-full text-left px-3 py-2 text-sm font-mono transition-colors cursor-pointer hover:bg-gold/10 ${
+                          count === n ? "text-gold font-bold bg-gold/5" : "text-ink"
+                        }`}
+                      >
+                        {n} image{n === 1 ? "" : "s"}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
             <button
               onClick={handleSend}
               disabled={sending || !instruction.trim() || selectedIds.size === 0}
-              className="flex-shrink-0 w-11 h-11 rounded-xl bg-gold text-bg flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer hover:bg-gold-light transition-colors"
+              className="flex-shrink-0 w-9 h-9 rounded-lg bg-gold text-bg flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer hover:bg-gold-light transition-colors"
             >
               {sending ? (
                 <div className="w-4 h-4 border-2 border-bg/40 border-t-bg rounded-full animate-spin" />
               ) : (
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
                 </svg>
               )}
@@ -781,6 +987,10 @@ function ChatInner({ sessionId }: { sessionId: string }) {
           >
             ×
           </button>
+
+          <div className="absolute top-4 left-4 z-10 bg-gold text-bg text-sm font-mono font-bold px-3 py-1.5 rounded-full shadow-[0_1px_4px_rgba(0,0,0,0.6)]">
+            #{designNumberById[viewingId]}
+          </div>
 
           {viewingSiblingIndex > 0 && (
             <button

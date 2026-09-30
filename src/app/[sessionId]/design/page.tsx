@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { useDropzone } from "react-dropzone";
 import { useAppStore } from "@/store/app-store";
-import type { DesignVariant } from "@/store/app-store";
+import type { DesignVariant, ModelChoice } from "@/store/app-store";
+import ModelChoiceSelector from "@/components/design/ModelChoiceSelector";
 import CameraCapture from "@/components/camera/CameraCapture";
 import StyleSelect from "@/components/ui/StyleSelect";
 import PinterestSearch from "@/components/pinterest/PinterestSearch";
@@ -28,13 +29,13 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
     targetBodyArea, setTargetBodyArea,
     referenceImages, addReferenceImage, removeReferenceImage, replaceReferenceImage,
     selectedColors, toggleColor, clearColors,
-    generatedDesigns,
     selectDesign,
     customerName,
     persistDesigns,
     hydrateFromSession,
     flowType, setFlowType, reworkMode, setReworkMode, reworkPhoto, setReworkPhoto,
     setPendingGeneration, setIsTextTattoo: setStoreIsTextTattoo,
+    setInitialGenerationModel,
     sessionId: storeSessionId,
   } = useAppStore();
 
@@ -66,6 +67,10 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
 
   const [isTextTattoo, setIsTextTattoo] = useState(false);
   const [showTypographyModal, setShowTypographyModal] = useState(false);
+  // Shared by both the AI Design and Rework tabs — which model(s) generate
+  // the first batch. Chat has its own, separate, two-option choice for every
+  // refinement after that.
+  const [modelChoice, setModelChoice] = useState<ModelChoice>("both");
   const [showColorModal, setShowColorModal] = useState(false);
   const [textTattooRefUrl, setTextTattooRefUrl] = useState<string | null>(null);
   const [enhancing, setEnhancing] = useState(false);
@@ -103,13 +108,20 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
     // a blank-store first render from bouncing the user away.
     if (!hydrating) return;
     if (!customerName) { router.replace("/"); return; }
-    // A direct/fresh visit to a session that already has AI-Design results —
-    // generation and results now live entirely in Chat, so send it there
-    // instead of showing this input form again.
-    if (flowType === "ai_design" && generatedDesigns.length > 0) {
-      router.replace(`/${sessionId}/chat`);
-    }
-  }, [hydrating, customerName, flowType, generatedDesigns.length, sessionId, router]);
+    // Deliberately no "already has results, send to Chat instead" redirect
+    // here — that used to live in this effect, but it can't tell a fresh
+    // external visit (where that redirect is the right call) apart from a
+    // deliberate Back-click from Chat (where it isn't): this effect reruns
+    // on every mount, including in-flow back-navigation, and would bounce
+    // the designer right back to the screen they just chose to leave. That
+    // decision now belongs entirely to the entry-point routers instead —
+    // SessionOverview's `continueUrl` and customer/[userId]'s `resumeUrl` —
+    // which run once, at the moment a session is actually opened, and
+    // already send it to the correct screen from the start. Once inside the
+    // flow, navigation between Design/Chat/Placement stays fully free, both
+    // ways — see AGENTS.md's "Resuming a session must check what actually
+    // happened" note for the entry-point routing rule this defers to.
+  }, [hydrating, customerName, router]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     accept: { "image/*": [".jpg", ".jpeg", ".png", ".webp", ".heic"] },
@@ -222,17 +234,16 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
       };
       const [persisted] = await persistDesigns([design]);
       const finalDesign = persisted ?? design;
-      // Deliberately not finishGenerating() here — that populates
-      // generatedDesigns, which the hydration effect above treats as "an
-      // ai_design session that already has results" and redirects to Chat.
-      // Nothing downstream of Upload Existing reads generatedDesigns; only
-      // selectedDesign (below) matters, which Placement actually reads.
+      // Deliberately not finishGenerating() here — nothing in the Upload
+      // Existing flow reads generatedDesigns; only selectedDesign (below)
+      // matters, which Placement actually reads.
       selectDesign(finalDesign);
       // sessions.flow_type defaults to 'ai_design' in the DB — without this
       // write, reopening this session later re-hydrates flowType back to
-      // 'ai_design' and the redirect-to-Chat guard above fires again on
-      // every future visit, not just this one (see also chat/page.tsx's
-      // own guard, and every other flow_type reader in the app).
+      // 'ai_design', and every entry-point router (SessionOverview's
+      // continueUrl, customer/[userId]'s resumeUrl) misreads this as a real
+      // AI Design session instead of an Upload Existing one — see AGENTS.md's
+      // "`flow_type` has three values, not two" note.
       await supabase.from("sessions").update({ flow_type: "direct" }).eq("id", sessionId);
       router.push(`/${sessionId}/placement`);
     } catch (err) {
@@ -258,6 +269,7 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
     setFlowType("rework");
     setReworkMode(reworkModeLocal);
     setReworkPhoto(reworkPhotoPreview);
+    setInitialGenerationModel(modelChoice);
     setPendingGeneration(true);
     // The chat screen re-reads flow_type from the DB as its source of truth
     // (so reopening a session later still shows the right context) — every
@@ -293,6 +305,7 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
     if (!canGenerate) return;
     setFlowType("ai_design");
     setStoreIsTextTattoo(isTextTattoo);
+    setInitialGenerationModel(modelChoice);
     setPendingGeneration(true);
     router.push(`/${sessionId}/chat`);
   }
@@ -640,6 +653,8 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
               />
             </div>
 
+            <ModelChoiceSelector value={modelChoice} onChange={setModelChoice} />
+
             <motion.button
               whileHover={reworkPhotoPreview && tattooDescription.trim() ? { scale: 1.02 } : {}}
               whileTap={reworkPhotoPreview && tattooDescription.trim() ? { scale: 0.97 } : {}}
@@ -885,6 +900,16 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
               onClose={() => setShowColorModal(false)}
             />
           )}
+
+          <ModelChoiceSelector
+            value={modelChoice}
+            onChange={setModelChoice}
+            disabledNote={
+              isTextTattoo
+                ? "Locked to Nano Banana Pro while Text Tattoo Mode is on — it renders lettering far more accurately."
+                : undefined
+            }
+          />
 
           {/* Reference images */}
           <div className="flex flex-col gap-3">

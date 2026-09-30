@@ -137,9 +137,10 @@ export default function AdminDashboard() {
           id, status, created_at,
           users(first_name), designer:designer_id(name),
           tattoo_designs!inner(image_url, style_name),
-          placements(final_composite_url)
+          placements(final_composite_url, is_finalized)
         `, { count: "exact" })
         .eq("tattoo_designs.is_finalized", true)
+        .eq("placements.is_finalized", true)
         .is("deleted_at", null)
         .order("created_at", { ascending: false })
         .range(0, WORK_PAGE_SIZE - 1),
@@ -228,9 +229,10 @@ export default function AdminDashboard() {
         id, status, created_at,
         users(first_name), designer:designer_id(name),
         tattoo_designs!inner(image_url, style_name),
-        placements(final_composite_url)
+        placements(final_composite_url, is_finalized)
       `)
       .eq("tattoo_designs.is_finalized", true)
+      .eq("placements.is_finalized", true)
       .is("deleted_at", null)
       .order("created_at", { ascending: false })
       .range(work.length, work.length + WORK_PAGE_SIZE - 1);
@@ -559,8 +561,14 @@ function mapWorkRow(r: any): WorkItem {
   const customer = Array.isArray(r.users) ? r.users[0] : r.users;
   const designer = Array.isArray(r.designer) ? r.designer[0] : r.designer;
   const design = Array.isArray(r.tattoo_designs) ? r.tattoo_designs[0] : r.tattoo_designs;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const placement = Array.isArray(r.placements) ? r.placements.find((p: any) => p.final_composite_url) : r.placements;
+  // The query already restricts the embedded placements to is_finalized=true
+  // (mirroring the same filter already applied to tattoo_designs) — these
+  // find()s are a defensive fallback, not the primary filter, so a session
+  // that somehow has no finalized placement row still falls back to
+  // something rather than showing a stale unfinalized attempt.
+  const placementRows: { final_composite_url: string | null; is_finalized: boolean }[] =
+    Array.isArray(r.placements) ? r.placements : r.placements ? [r.placements] : [];
+  const placement = placementRows.find((p) => p.is_finalized) ?? placementRows.find((p) => p.final_composite_url);
   return {
     id: r.id,
     imageUrl: placement?.final_composite_url ?? design?.image_url,

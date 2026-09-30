@@ -19,10 +19,20 @@ type RunResult =
   | { ok: true; url: string }
   | { ok: false; reason: string; taskId?: string; credits?: boolean };
 
-async function runOneTask(prompt: string, inputUrls: string[]): Promise<RunResult> {
+type ReworkModel = "nano-banana-pro" | "gpt-image-2-image-to-image";
+type ModelChoice = ReworkModel | "both";
+
+// "Both" alternates per slot (0=nano, 1=gpt, 2=nano, ...) so a 5-image batch
+// is a real side-by-side comparison, not two lopsided clusters.
+function pickModel(choice: ModelChoice, slotIndex: number): ReworkModel {
+  if (choice === "both") return slotIndex % 2 === 0 ? "nano-banana-pro" : "gpt-image-2-image-to-image";
+  return choice;
+}
+
+async function runOneTask(prompt: string, inputUrls: string[], model: ReworkModel): Promise<RunResult> {
   let taskId: string | undefined;
   try {
-    taskId = await createKeiTask(prompt, inputUrls, { model: "nano-banana-pro" });
+    taskId = await createKeiTask(prompt, inputUrls, { model });
     const url = await waitForKeiTask(taskId);
     return { ok: true, url };
   } catch (err) {
@@ -45,6 +55,7 @@ export async function POST(req: NextRequest) {
     sourcePhotoUrl,    // already-hosted — first generation, resumed session
     editInstruction = "",
     editSourceUrls = [] as string[],
+    modelChoice = "both" as ModelChoice,
     parentDesignIds = [] as string[], // tattoo_designs.id values — for job/lineage tracking, not generation input
   } = await req.json();
 
@@ -102,24 +113,25 @@ export async function POST(req: NextRequest) {
   // of holding a connection open for the full 1-2 minutes this can take.
   after(async () => {
     await Promise.allSettled(
-      Array.from({ length: clampedCount }, (_, index) =>
-        runOneTask(prompt, inputUrls)
+      Array.from({ length: clampedCount }, (_, index) => {
+        const slotModel = pickModel(modelChoice, index);
+        return runOneTask(prompt, inputUrls, slotModel)
           .then(async (result) => {
             if (!result.ok) {
               console.warn(`[generate-rework] task ${index} failed: ${result.reason}`);
-              await setSlot(sessionId, index, { status: "error", reason: result.reason, code: result.credits ? "insufficient_credits" : undefined });
+              await setSlot(sessionId, index, { status: "error", reason: result.reason, code: result.credits ? "insufficient_credits" : undefined, model: slotModel });
               return;
             }
             try {
               const imageBase64 = await fetchAsBase64(result.url);
-              await setSlot(sessionId, index, { status: "done", imageBase64 });
+              await setSlot(sessionId, index, { status: "done", imageBase64, model: slotModel });
             } catch (err) {
               console.error(`[generate-rework] fetching result failed for task ${index}:`, err);
-              await setSlot(sessionId, index, { status: "error", reason: `Image fetch failed: ${(err as Error).message}` });
+              await setSlot(sessionId, index, { status: "error", reason: `Image fetch failed: ${(err as Error).message}`, model: slotModel });
             }
           })
-          .catch((err) => setSlot(sessionId, index, { status: "error", reason: (err as Error).message }))
-      )
+          .catch((err) => setSlot(sessionId, index, { status: "error", reason: (err as Error).message, model: slotModel }));
+      })
     );
   });
 

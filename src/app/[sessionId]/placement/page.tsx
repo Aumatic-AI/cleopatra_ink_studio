@@ -5,10 +5,12 @@ import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { useDropzone } from "react-dropzone";
 import { useAppStore } from "@/store/app-store";
+import type { PlacementResult } from "@/store/app-store";
 import CameraCapture from "@/components/camera/CameraCapture";
 import TattooPlacementEditor from "@/components/placement/TattooPlacementEditor";
 import { uploadPhotoDirect, uploadBase64Direct } from "@/lib/browser-upload";
 import { resolveImageSrc } from "@/lib/image-src";
+import { getModelLabel } from "@/lib/model-labels";
 
 // Shown when the AI image service rejects the request for exhausted credits.
 // Direct copy so studio staff immediately know the fix is to top up the AI
@@ -34,7 +36,9 @@ const QUICK_PLACEMENTS = [
 const PLACEMENT_POLL_INTERVAL_MS = 4000;
 const MAX_NOT_FOUND_ATTEMPTS = 3; // grace period for a job that was *just* started
 
-type PlacementJobOutcome = { imageBase64: string } | { error: string; code?: string };
+type PlacementSlotOutcome =
+  | { model?: string; imageBase64: string }
+  | { model?: string; error: string; code?: string };
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -43,13 +47,14 @@ function sleep(ms: number) {
 // Polls the fire-and-forget placement job to completion instead of holding
 // one HTTP request open for the 1-3 minutes generation can take — that also
 // means a page reload doesn't lose an in-progress preview, since the job
-// lives on the server, not in this component.
-async function watchPlacementJob(sessionId: string): Promise<PlacementJobOutcome> {
+// lives on the server, not in this component. One slot per model (see
+// AGENTS.md) — waits for every slot to resolve, then returns them all.
+async function watchPlacementJob(sessionId: string): Promise<PlacementSlotOutcome[]> {
   const jobKey = `placement:${sessionId}`;
   let notFoundStreak = 0;
 
   while (true) {
-    let status: { found: boolean; done?: boolean; slots?: Array<{ status: string; imageBase64?: string; reason?: string; code?: string }> };
+    let status: { found: boolean; done?: boolean; slots?: Array<{ status: string; imageBase64?: string; reason?: string; code?: string; model?: string }> };
     try {
       const res = await fetch(`/api/generation-status?sessionId=${encodeURIComponent(jobKey)}`);
       status = await res.json();
@@ -61,26 +66,53 @@ async function watchPlacementJob(sessionId: string): Promise<PlacementJobOutcome
     if (!status.found) {
       notFoundStreak++;
       if (notFoundStreak >= MAX_NOT_FOUND_ATTEMPTS) {
-        return { error: "Generation failed unexpectedly on the server." };
+        return [{ error: "Generation failed unexpectedly on the server." }];
       }
       await sleep(PLACEMENT_POLL_INTERVAL_MS);
       continue;
     }
     notFoundStreak = 0;
 
-    const slot = status.slots?.[0];
-    if (!slot || slot.status === "pending") {
+    if (!status.done || !status.slots || status.slots.length === 0) {
       await sleep(PLACEMENT_POLL_INTERVAL_MS);
       continue;
     }
-    if (slot.status === "error") {
-      return { error: slot.reason ?? "Placement generation failed", code: slot.code };
-    }
-    if (!slot.imageBase64) {
-      return { error: "This image failed to generate." };
-    }
-    return { imageBase64: slot.imageBase64 };
+
+    return status.slots.map((slot) => {
+      if (slot.status === "error") return { model: slot.model, error: slot.reason ?? "Placement generation failed", code: slot.code };
+      if (!slot.imageBase64) return { model: slot.model, error: "This image failed to generate." };
+      return { model: slot.model, imageBase64: slot.imageBase64 };
+    });
   }
+}
+
+// Shared by the fresh-generate path and the resume-on-reload path: uploads
+// each successful slot and persists it as its own placements row, all
+// sharing one attemptId so they group together as one comparison on reload.
+async function persistPlacementOutcomes(
+  outcomes: PlacementSlotOutcome[],
+  sessionId: string,
+  persistPlacement: (data: { placementText?: string; bodyPhotoUrl?: string; compositeUrl?: string; model?: string; attemptId?: string }) => Promise<string | null>,
+  extra?: { placementText?: string; bodyPhotoUrl?: string }
+): Promise<{ results: PlacementResult[]; firstError: { message: string; code?: string } | null }> {
+  const attemptId = crypto.randomUUID();
+  const results: PlacementResult[] = [];
+  let firstError: { message: string; code?: string } | null = null;
+
+  for (const outcome of outcomes) {
+    if ("error" in outcome) {
+      if (!firstError) firstError = { message: outcome.error, code: outcome.code };
+      continue;
+    }
+    try {
+      const resultUrl = await uploadBase64Direct(outcome.imageBase64, sessionId, "previews");
+      const id = await persistPlacement({ ...extra, compositeUrl: resultUrl, model: outcome.model, attemptId });
+      if (id) results.push({ dbId: id, url: resultUrl, model: outcome.model ?? null });
+    } catch (err) {
+      if (!firstError) firstError = { message: (err as Error).message };
+    }
+  }
+  return { results, firstError };
 }
 
 export default function PlacementPage({ params }: { params: Promise<{ sessionId: string }> }) {
@@ -95,15 +127,13 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
     setPlacementText,
     bodyPhoto,
     setBodyPhoto,
-    finalComposite,
+    placementResults,
     generatePlacement,
     finishPlacement,
     isGeneratingPlacement,
     persistPlacement,
     finalizeSession,
     hydrateFromSession,
-    placementDbId,
-    setPlacementDbId,
     sessionStatus,
   } = useAppStore();
 
@@ -118,7 +148,8 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
   const [creditsError, setCreditsError] = useState(false);
   // Composite from the interactive placement editor (base64 data URL)
   const [placementComposite, setPlacementComposite] = useState<string | null>(null);
-  const [finalizing, setFinalizing] = useState(false);
+  // dbId of whichever result tile is currently being finalized
+  const [finalizingDbId, setFinalizingDbId] = useState<string | null>(null);
   // Seconds elapsed since the current generation started; drives the loading UI.
   const [elapsed, setElapsed] = useState(0);
   const loadingRef = useRef<HTMLDivElement>(null);
@@ -177,22 +208,15 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
       }
       if (!cancelled && status.found && !status.done) {
         generatePlacement();
-        const outcome = await watchPlacementJob(sessionId);
+        const outcomes = await watchPlacementJob(sessionId);
         if (cancelled) return;
-        if ("imageBase64" in outcome) {
-          try {
-            const resultUrl = await uploadBase64Direct(outcome.imageBase64, sessionId, "previews");
-            finishPlacement(resultUrl);
-            const id = await persistPlacement({ compositeUrl: resultUrl });
-            setPlacementDbId(id);
-          } catch (err) {
-            setError((err as Error).message);
-            finishPlacement("");
-          }
-        } else {
-          if (outcome.code === "insufficient_credits") setCreditsError(true);
-          setError(outcome.error);
-          finishPlacement("");
+        const { results, firstError } = await persistPlacementOutcomes(outcomes, sessionId, persistPlacement);
+        finishPlacement(results);
+        if (results.length === 0) {
+          if (firstError?.code === "insufficient_credits") setCreditsError(true);
+          setError(firstError?.message ?? "Placement generation failed");
+        } else if (firstError) {
+          setError(`One version failed to generate: ${firstError.message}`);
         }
       }
     })();
@@ -266,51 +290,52 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
       const startJson = await res.json();
       if (!res.ok) throw new Error(startJson.error ?? "Placement generation failed to start");
 
-      const outcome = await watchPlacementJob(sessionId);
-      if ("error" in outcome) {
-        if (outcome.code === "insufficient_credits") {
-          setCreditsError(true);
-          throw new Error(SERVICE_UNAVAILABLE_MSG);
-        }
-        throw new Error(outcome.error);
-      }
-
-      const resultUrl = await uploadBase64Direct(outcome.imageBase64, sessionId, "previews");
-      finishPlacement(resultUrl);
-
-      // Persist this placement attempt
-      const id = await persistPlacement({
+      const outcomes = await watchPlacementJob(sessionId);
+      const { results, firstError } = await persistPlacementOutcomes(outcomes, sessionId, persistPlacement, {
         placementText: inputMode === "text" ? placementText : undefined,
         bodyPhotoUrl: bodyPhotoUrl ?? compositeUrl,
-        compositeUrl: resultUrl,
       });
-      setPlacementDbId(id);
+      finishPlacement(results);
+
+      if (results.length === 0) {
+        if (firstError?.code === "insufficient_credits") {
+          setCreditsError(true);
+          setError(SERVICE_UNAVAILABLE_MSG);
+        } else {
+          setError(firstError?.message ?? "Placement generation failed");
+        }
+        return;
+      }
+      // Partial success (one model failed, the other worked) — show what we
+      // have but still surface the failure so staff knows one model dropped.
+      if (firstError) {
+        setError(`One version failed to generate: ${firstError.message}`);
+      }
     } catch (err) {
       setError((err as Error).message);
-      finishPlacement("");
+      finishPlacement([]);
     }
   }
 
-  async function handleFinalize() {
-    if (!selectedDesign?.dbId || !placementDbId) {
+  async function handleFinalize(dbId: string) {
+    if (!selectedDesign?.dbId) {
       setError("Unable to finalize — please regenerate and try again.");
       return;
     }
-    setFinalizing(true);
+    setFinalizingDbId(dbId);
     try {
-      await finalizeSession(selectedDesign.dbId, placementDbId);
+      await finalizeSession(selectedDesign.dbId, dbId);
       setDone(true);
     } catch (err) {
       setError((err as Error).message);
     } finally {
-      setFinalizing(false);
+      setFinalizingDbId(null);
     }
   }
 
   function handleReset() {
-    finishPlacement("");
+    finishPlacement([]);
     setPlacementComposite(null);
-    setPlacementDbId(null);
     setError(null);
   }
 
@@ -701,7 +726,7 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
 
         {/* ── Result ────────────────────────────────────────────────── */}
         <AnimatePresence>
-          {!isGeneratingPlacement && finalComposite && (
+          {!isGeneratingPlacement && placementResults.length > 0 && (
             <motion.div
               key="result"
               initial={{ opacity: 0, y: 16 }}
@@ -710,7 +735,9 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
               className="flex flex-col gap-6"
             >
               <div className="flex items-center justify-between flex-wrap gap-2">
-                <h2 className="font-cinzel text-xl font-bold text-ink">Placement Preview</h2>
+                <h2 className="font-cinzel text-xl font-bold text-ink">
+                  {placementResults.length > 1 ? "Placement Previews — pick one" : "Placement Preview"}
+                </h2>
                 <div className="flex items-center gap-2">
                   {sessionStatus === "completed" && (
                     <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-gold bg-gold/10 border border-gold/30 px-2.5 py-1 rounded-full">
@@ -724,42 +751,54 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
                 </div>
               </div>
 
-              <div className="rounded-2xl overflow-hidden border border-gold/20 relative bg-surface-2">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={finalComposite}
-                  alt="Tattoo placement preview"
-                  className="w-full object-contain max-h-[560px]"
-                />
-                <div className="absolute bottom-3 left-3 right-3 flex items-end justify-between pointer-events-none">
-                  <div className="bg-black/70 backdrop-blur-sm text-ink/90 text-xs font-cinzel px-3 py-1.5 rounded-lg">
-                    {placementText || "Body placement preview"}
-                  </div>
-                  <div className="bg-black/70 backdrop-blur-sm text-gold text-[10px] font-mono px-2 py-1 rounded-lg border border-gold/20">
-                    AI Preview
-                  </div>
-                </div>
+              <div className={`grid gap-4 ${placementResults.length > 1 ? "sm:grid-cols-2" : ""}`}>
+                {placementResults.map((result) => {
+                  const label = getModelLabel(result.model);
+                  const isFinalizingThis = finalizingDbId === result.dbId;
+                  return (
+                    <div key={result.dbId} className="flex flex-col gap-3">
+                      <div className="rounded-2xl overflow-hidden border border-gold/20 relative bg-surface-2">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={result.url}
+                          alt="Tattoo placement preview"
+                          className="w-full object-contain max-h-[480px]"
+                        />
+                        <div className="absolute bottom-3 left-3 right-3 flex items-end justify-between pointer-events-none">
+                          <div className="bg-black/70 backdrop-blur-sm text-ink/90 text-xs font-cinzel px-3 py-1.5 rounded-lg">
+                            {placementText || "Body placement preview"}
+                          </div>
+                          <div className="bg-black/70 backdrop-blur-sm text-gold text-[10px] font-mono px-2 py-1 rounded-lg border border-gold/20">
+                            {label ?? "AI Preview"}
+                          </div>
+                        </div>
+                      </div>
+                      {sessionStatus !== "completed" && (
+                        <motion.button
+                          whileHover={finalizingDbId ? {} : { scale: 1.02 }}
+                          whileTap={finalizingDbId ? {} : { scale: 0.97 }}
+                          onClick={() => handleFinalize(result.dbId)}
+                          disabled={!!finalizingDbId}
+                          className="w-full bg-gold text-bg font-cinzel font-bold text-sm tracking-[0.08em] uppercase py-3.5 rounded-xl border border-gold hover:bg-gold-light transition-colors cursor-pointer shadow-[0_0_24px_rgba(201,168,76,0.3)] disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          {isFinalizingThis ? "Saving…" : `✦ Use This${label ? ` (${label})` : ""}`}
+                        </motion.button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
 
-              <div className="hidden sm:flex flex-col sm:flex-row gap-3">
+              {sessionStatus !== "completed" && (
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.97 }}
                   onClick={handleReset}
-                  className="flex-1 py-3 rounded-xl font-cinzel text-sm tracking-wide border border-cleo-border text-muted hover:text-ink hover:border-gold/40 transition-all cursor-pointer"
+                  className="py-3 rounded-xl font-cinzel text-sm tracking-wide border border-cleo-border text-muted hover:text-ink hover:border-gold/40 transition-all cursor-pointer"
                 >
                   ↺ Try Different Placement
                 </motion.button>
-                <motion.button
-                  whileHover={finalizing ? {} : { scale: 1.02 }}
-                  whileTap={finalizing ? {} : { scale: 0.97 }}
-                  onClick={handleFinalize}
-                  disabled={finalizing}
-                  className="flex-1 bg-gold text-bg font-cinzel font-bold text-base tracking-[0.08em] uppercase py-4 rounded-xl border border-gold hover:bg-gold-light transition-colors cursor-pointer shadow-[0_0_24px_rgba(201,168,76,0.3)] disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {finalizing ? "Saving…" : "✦ Looks Perfect — Finalize"}
-                </motion.button>
-              </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -774,22 +813,17 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
           >
             Generating Preview…
           </button>
-        ) : finalComposite ? (
-          <div className="flex gap-2">
+        ) : placementResults.length > 0 ? (
+          // Finalize now lives on each preview tile above (disambiguates
+          // which one, once there are two) — this bar just offers retry.
+          sessionStatus !== "completed" && (
             <button
               onClick={handleReset}
-              className="flex-1 py-3 rounded-xl font-cinzel font-bold text-[11px] tracking-[0.06em] uppercase border border-cleo-border text-muted cursor-pointer"
+              className="w-full py-3 rounded-xl font-cinzel font-bold text-[11px] tracking-[0.06em] uppercase border border-cleo-border text-muted cursor-pointer"
             >
-              ↺ Retry
+              ↺ Try Different Placement
             </button>
-            <button
-              onClick={handleFinalize}
-              disabled={finalizing}
-              className="flex-[1.6] py-3 rounded-xl font-cinzel font-bold text-sm tracking-[0.06em] uppercase bg-gold text-bg border border-gold cursor-pointer shadow-[0_0_18px_rgba(201,168,76,0.25)] disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {finalizing ? "Saving…" : "✦ Finalize"}
-            </button>
-          </div>
+          )
         ) : (
           <button
             onClick={handleGenerate}

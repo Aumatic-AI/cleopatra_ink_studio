@@ -113,6 +113,10 @@ create table tattoo_designs (
   -- background, no skin/body. Generated once a design is finalized, cached
   -- here so re-opening the session later doesn't regenerate it again.
   flash_image_url   text,
+  -- Which image model produced this design ('nano-banana-pro' |
+  -- 'gpt-image-2-image-to-image') — null for designs with no generation
+  -- (Upload Existing). Shown as a small tag in Chat.
+  generation_model  text,
   created_at        timestamptz not null default now()
 );
 
@@ -152,6 +156,13 @@ create table placements (
   body_photo_url      text,
   final_composite_url text,
   is_finalized        boolean     not null default false,
+  -- Which image model produced this composite ('nano-banana-pro' |
+  -- 'gpt-image-2-image-to-image') — shown as a small tag in the UI.
+  generation_model    text,
+  -- Shared by every row from the same "Generate Preview" click (currently
+  -- always 2 — one per model, see AGENTS.md) so they group together as one
+  -- comparison on reload. Null for attempts from before this column existed.
+  attempt_id          uuid,
   created_at          timestamptz not null default now()
 );
 
@@ -201,6 +212,9 @@ create table generation_job_slots (
   image_base64 text,
   reason       text,
   code         text,
+  -- Which image model this slot used — set on both success and error so an
+  -- errored slot's tag is still meaningful.
+  model        text,
   updated_at   timestamptz not null default now(),
   primary key (job_key, slot_index)
 );

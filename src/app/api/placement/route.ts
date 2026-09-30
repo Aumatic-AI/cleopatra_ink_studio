@@ -16,19 +16,23 @@ type KeiRunResult =
   | { ok: true; url: string; taskId: string }
   | { ok: false; kind: "failed" | "timeout" | "error" | "credits"; reason: string; taskId?: string };
 
-// TEST: switched from Gemini 3 Pro Image (nano-banana-pro) to gpt-image —
-// nano-banana-pro kept drifting the tattoo's position/pose instead of
-// strictly preserving the composite; gpt-image's edit mode is built for
-// exactly that "change only this, preserve everything else" behavior and
-// already proved out for the Rework edit flow. Revert to "nano-banana-pro"
-// to go back.
-const PLACEMENT_MODEL = "gpt-image-2-image-to-image" as const;
+type PlacementModel = "gpt-image-2-image-to-image" | "nano-banana-pro";
+
+// One placement generation now produces one result per model, not a staff
+// choice — see the AGENTS.md note on this. Slot 0 stays gpt-image, the model
+// already proven correct here: nano-banana-pro was tried and rejected for
+// this specific job because it let the tattoo's position/pose drift instead
+// of strictly preserving the composite, which gpt-image's edit mode handles
+// correctly ("change only this, preserve everything else"). Slot 1 is the
+// side-by-side comparison so staff can judge for themselves rather than
+// trust that old finding forever.
+const PLACEMENT_MODELS: readonly PlacementModel[] = ["gpt-image-2-image-to-image", "nano-banana-pro"];
 
 // Single attempt at a KEI generation. Caller decides whether to retry.
-async function runKeiOnce(prompt: string, inputUrls: string[]): Promise<KeiRunResult> {
+async function runKeiOnce(prompt: string, inputUrls: string[], model: PlacementModel): Promise<KeiRunResult> {
   let taskId: string | undefined;
   try {
-    taskId = await createKeiTask(prompt, inputUrls, { model: PLACEMENT_MODEL });
+    taskId = await createKeiTask(prompt, inputUrls, { model });
     const url = await waitForKeiTask(taskId);
     return { ok: true, url, taskId };
   } catch (err) {
@@ -47,11 +51,11 @@ async function runKeiOnce(prompt: string, inputUrls: string[]): Promise<KeiRunRe
 // Up to two attempts: one retry on real failures (KEI 5xx, "Internal Error",
 // moderation flake). Timeouts and credits errors are not retried — a retry
 // would just queue the same doomed job and burn the request budget.
-async function runKeiWithRetry(prompt: string, inputUrls: string[]): Promise<KeiRunResult> {
-  const first = await runKeiOnce(prompt, inputUrls);
+async function runKeiWithRetry(prompt: string, inputUrls: string[], model: PlacementModel): Promise<KeiRunResult> {
+  const first = await runKeiOnce(prompt, inputUrls, model);
   if (first.ok || first.kind === "timeout" || first.kind === "credits") return first;
   console.warn(`[placement] KEI ${first.kind} (${first.reason}) — retrying once`);
-  return runKeiOnce(prompt, inputUrls);
+  return runKeiOnce(prompt, inputUrls, model);
 }
 
 // Fetching from KEI works reliably from this server (unlike uploading TO
@@ -106,32 +110,42 @@ export async function POST(req: NextRequest) {
   // ── Start the job and return immediately ─────────────────────────────
   // The client polls /api/generation-status instead of holding this
   // connection open for the 1-3 minutes this generation can take — that
-  // also means a page reload doesn't kill an in-progress preview.
+  // also means a page reload doesn't kill an in-progress preview. One slot
+  // per model in PLACEMENT_MODELS, run in parallel exactly like the AI
+  // Design/Rework batches.
   const jobKey = placementJobKey(sessionId);
   try {
-    await startJob(jobKey, 1, 1);
+    await startJob(jobKey, 1, PLACEMENT_MODELS.length);
   } catch (err) {
     return Response.json({ error: `Couldn't start the generation job: ${(err as Error).message}` }, { status: 500 });
   }
 
   after(async () => {
-    const result = await runKeiWithRetry(prompt, inputUrls);
-    if (!result.ok) {
-      console.warn(`[placement] generation failed: ${result.reason}`);
-      await setSlot(jobKey, 0, {
-        status: "error",
-        reason: result.reason,
-        code: result.kind === "credits" ? "insufficient_credits" : undefined,
-      });
-      return;
-    }
-    try {
-      const imageBase64 = await fetchAsBase64(result.url);
-      await setSlot(jobKey, 0, { status: "done", imageBase64 });
-    } catch (err) {
-      console.error("[placement] fetching result failed:", err);
-      await setSlot(jobKey, 0, { status: "error", reason: `Fetching result failed: ${(err as Error).message}` });
-    }
+    await Promise.allSettled(
+      PLACEMENT_MODELS.map((model, index) =>
+        runKeiWithRetry(prompt, inputUrls, model)
+          .then(async (result) => {
+            if (!result.ok) {
+              console.warn(`[placement] ${model} generation failed: ${result.reason}`);
+              await setSlot(jobKey, index, {
+                status: "error",
+                reason: result.reason,
+                code: result.kind === "credits" ? "insufficient_credits" : undefined,
+                model,
+              });
+              return;
+            }
+            try {
+              const imageBase64 = await fetchAsBase64(result.url);
+              await setSlot(jobKey, index, { status: "done", imageBase64, model });
+            } catch (err) {
+              console.error(`[placement] fetching ${model} result failed:`, err);
+              await setSlot(jobKey, index, { status: "error", reason: `Fetching result failed: ${(err as Error).message}`, model });
+            }
+          })
+          .catch((err) => setSlot(jobKey, index, { status: "error", reason: (err as Error).message, model }))
+      )
+    );
   });
 
   return Response.json({ ok: true });

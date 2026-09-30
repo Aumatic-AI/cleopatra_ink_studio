@@ -187,11 +187,12 @@ function CustomerDashboardInner() {
           .select(`
             id, tattoo_style, tattoo_description, flow_type, completed_at,
             tattoo_designs!inner(image_url, style_name),
-            placements(placement_text, final_composite_url)
+            placements(placement_text, final_composite_url, is_finalized)
           `)
           .eq("user_id", userId)
           .eq("status", "completed")
           .eq("tattoo_designs.is_finalized", true)
+          .eq("placements.is_finalized", true)
           .is("deleted_at", null)
           .order("completed_at", { ascending: false }),
         supabase
@@ -216,9 +217,12 @@ function CustomerDashboardInner() {
           flow_type: s.flow_type ?? "ai_design",
           completed_at: s.completed_at,
           design: Array.isArray(s.tattoo_designs) ? s.tattoo_designs[0] ?? null : s.tattoo_designs,
+          // The query already restricts the embedded placements to
+          // is_finalized=true — this is a defensive fallback, not the
+          // primary filter (see studio/admin/page.tsx's mapWorkRow).
           placement: Array.isArray(s.placements)
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ? s.placements.find((p: any) => p.final_composite_url) ?? s.placements[0] ?? null
+            ? s.placements.find((p: any) => p.is_finalized) ?? s.placements.find((p: any) => p.final_composite_url) ?? null
             : s.placements,
           sourcePhoto: null,
         }));

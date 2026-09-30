@@ -18,6 +18,11 @@ export interface JobSlot {
   imageBase64?: string;
   reason?: string;
   code?: string;
+  // Which image-generation model this slot used — set on both success and
+  // error so a failed slot's tag is still meaningful. Absent for slots that
+  // never got far enough to know (e.g. a request that failed before model
+  // selection).
+  model?: string;
 }
 
 export interface Job {
@@ -43,6 +48,44 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Node's `fetch` throws a bare `TypeError: fetch failed` for almost any
+// underlying network problem — the actual reason (ECONNRESET, ENOTFOUND,
+// a TLS failure, etc.) is on `.cause`, one or more levels deep, and gets
+// silently discarded by a plain `error.message` read. Without this, every
+// failure here looks identical regardless of cause — see the Known
+// machine-specific issue note in AGENTS.md.
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    const parts = [err.message];
+    let cause = (err as { cause?: unknown }).cause;
+    for (let depth = 0; depth < 3 && cause; depth++) {
+      if (cause instanceof Error) {
+        parts.push(cause.message);
+        cause = (cause as { cause?: unknown }).cause;
+      } else {
+        parts.push(describeError(cause));
+        break;
+      }
+    }
+    return parts.join(" — caused by: ");
+  }
+  // Supabase/Postgrest errors are plain objects, not Error instances —
+  // String(plainObject) is "[object Object]", not remotely useful. Pull out
+  // whichever of its real fields exist instead.
+  if (err && typeof err === "object") {
+    const obj = err as Record<string, unknown>;
+    const parts = [obj.message, obj.details, obj.hint, obj.code]
+      .filter((v): v is string => typeof v === "string" && v.length > 0);
+    if (parts.length > 0) return parts.join(" — ");
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
+  return String(err);
+}
+
 // The Node-side fetch-to-Supabase flakiness noted in AGENTS.md applies here
 // too, and these calls are unavoidably server-side (already inside the
 // service-role generation routes). Same retry-with-backoff convention as
@@ -57,7 +100,7 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
       if (attempt < RETRY_ATTEMPTS) await sleep(500 * attempt);
     }
   }
-  throw lastError;
+  throw new Error(describeError(lastError));
 }
 
 // Starting a job replaces any previous one under the same key (a session/
@@ -134,7 +177,7 @@ export async function getJob(jobKey: string): Promise<Job | undefined> {
 
   const { data: slotRows, error: slotsError } = await supabase
     .from("generation_job_slots")
-    .select("status, image_base64, reason, code")
+    .select("status, image_base64, reason, code, model")
     .eq("job_key", jobKey)
     .order("slot_index", { ascending: true });
   if (slotsError || !slotRows) return undefined;
@@ -148,6 +191,7 @@ export async function getJob(jobKey: string): Promise<Job | undefined> {
       imageBase64: row.image_base64 ?? undefined,
       reason: row.reason ?? undefined,
       code: row.code ?? undefined,
+      model: row.model ?? undefined,
     })),
     createdAt,
   };
@@ -164,6 +208,7 @@ export async function setSlot(jobKey: string, index: number, slot: JobSlot): Pro
           image_base64: slot.imageBase64 ?? null,
           reason: slot.reason ?? null,
           code: slot.code ?? null,
+          model: slot.model ?? null,
         })
         .eq("job_key", jobKey)
         .eq("slot_index", index);

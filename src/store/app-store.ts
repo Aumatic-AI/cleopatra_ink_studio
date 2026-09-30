@@ -29,6 +29,17 @@ export interface DesignVariant {
   patternType: "mandala" | "geometric" | "tribal" | "floral" | "dark" | "minimal" | "japanese" | "biomech";
   styleName: string;
   imageUrl?: string; // real generated image from KEI API
+  model?: string; // which image-generation model produced it — for the model tag in Chat
+}
+
+export type ModelChoice = "nano-banana-pro" | "gpt-image-2-image-to-image" | "both";
+
+// One placement generation attempt now produces one result per model (see
+// AGENTS.md) — this is one of those results, tagged with which model made it.
+export interface PlacementResult {
+  dbId: string;
+  url: string;
+  model: string | null;
 }
 
 interface AppState {
@@ -65,13 +76,18 @@ interface AppState {
   // Set right before navigating Design -> Chat; the chat screen consumes it
   // to know it should kick off the first generation itself, then clears it.
   pendingGeneration: boolean;
+  // The model choice picked on the Design page for the very first batch —
+  // Chat reads this once for that first generation, then uses its own local
+  // (two-option, no "both") selector for every refinement after that.
+  initialGenerationModel: ModelChoice;
 
   // Placement step
   placementText: string;
   bodyPhoto: string | null;
-  finalComposite: string | null;
+  // One result per model from the most recent generation attempt (see
+  // AGENTS.md) — not a single composite anymore.
+  placementResults: PlacementResult[];
   isGeneratingPlacement: boolean;
-  placementDbId: string | null; // placements.id of the most recent saved attempt
 
   // The session row's actual status (from the DB, via hydrateFromSession) —
   // lets a reloaded page tell "already finalized" from "still in progress"
@@ -92,6 +108,7 @@ interface AppState {
   setReworkMode: (mode: "cover" | "extend") => void;
   setReworkPhoto: (url: string | null) => void;
   setPendingGeneration: (pending: boolean) => void;
+  setInitialGenerationModel: (choice: ModelChoice) => void;
   setIsTextTattoo: (value: boolean) => void;
   addReferenceImage: (url: string) => void;
   removeReferenceImage: (index: number) => void;
@@ -109,11 +126,10 @@ interface AppState {
   setPlacementText: (text: string) => void;
   setBodyPhoto: (url: string | null) => void;
   generatePlacement: () => void;
-  finishPlacement: (composite: string) => void;
-  setPlacementDbId: (id: string | null) => void;
+  finishPlacement: (results: PlacementResult[]) => void;
   // Supabase persistence
   persistDesigns: (designs: DesignVariant[], meta?: { iteration?: number; parentDesignIds?: string[]; userInstruction?: string }) => Promise<DesignVariant[]>;
-  persistPlacement: (data: { placementText?: string; bodyPhotoUrl?: string; compositeUrl?: string }) => Promise<string | null>;
+  persistPlacement: (data: { placementText?: string; bodyPhotoUrl?: string; compositeUrl?: string; model?: string; attemptId?: string }) => Promise<string | null>;
   finalizeSession: (designId: string, placementId: string) => Promise<void>;
   finalizeReworkSession: (designId: string) => Promise<void>;
   // Restore state from Supabase for the given session (used after reload)
@@ -140,6 +156,7 @@ const defaultState = {
   reworkMode: "cover" as "cover" | "extend",
   reworkPhoto: null as string | null,
   pendingGeneration: false,
+  initialGenerationModel: "both" as ModelChoice,
   referenceImages: [],
   selectedColors: [] as string[],
   generatedDesigns: [],
@@ -150,9 +167,8 @@ const defaultState = {
   iterationCount: 0,
   placementText: "",
   bodyPhoto: null,
-  finalComposite: null,
+  placementResults: [] as PlacementResult[],
   isGeneratingPlacement: false,
-  placementDbId: null as string | null,
   sessionStatus: "active" as "active" | "completed" | "abandoned",
   hydratedSessionId: null as string | null,
 };
@@ -170,6 +186,7 @@ const freshSessionDesignState = {
   reworkMode: "cover" as "cover" | "extend",
   reworkPhoto: null as string | null,
   pendingGeneration: false,
+  initialGenerationModel: "both" as ModelChoice,
   referenceImages: [] as string[],
   selectedColors: [] as string[],
   generatedDesigns: [],
@@ -180,9 +197,8 @@ const freshSessionDesignState = {
   iterationCount: 0,
   placementText: "",
   bodyPhoto: null,
-  finalComposite: null,
+  placementResults: [] as PlacementResult[],
   isGeneratingPlacement: false,
-  placementDbId: null,
   sessionStatus: "active" as "active" | "completed" | "abandoned",
 };
 
@@ -273,6 +289,8 @@ export const useAppStore = create<AppState>()(
 
   setPendingGeneration: (pending) => set({ pendingGeneration: pending }),
 
+  setInitialGenerationModel: (choice) => set({ initialGenerationModel: choice }),
+
   setIsTextTattoo: (value) => set({ isTextTattoo: value }),
 
   generateDesigns: () =>
@@ -316,12 +334,10 @@ export const useAppStore = create<AppState>()(
 
   setBodyPhoto: (url) => set({ bodyPhoto: url }),
 
-  generatePlacement: () => set({ isGeneratingPlacement: true }),
+  generatePlacement: () => set({ isGeneratingPlacement: true, placementResults: [] }),
 
-  finishPlacement: (composite) =>
-    set({ isGeneratingPlacement: false, finalComposite: composite }),
-
-  setPlacementDbId: (id) => set({ placementDbId: id }),
+  finishPlacement: (results) =>
+    set({ isGeneratingPlacement: false, placementResults: results }),
 
   persistDesigns: async (designs, meta) => {
     const { sessionId, tattooStyle, tattooDescription, targetBodyArea, iterationCount, flowType } = get();
@@ -356,13 +372,24 @@ export const useAppStore = create<AppState>()(
           iteration: meta?.iteration ?? iterationCount,
           parent_design_ids: meta?.parentDesignIds ?? [],
           user_instruction: meta?.userInstruction ?? null,
+          generation_model: d.model ?? null,
         }))
       )
       .select("id, image_url");
 
     if (error || !data) {
-      console.error("persistDesigns failed:", error);
-      return designs;
+      // Never silently pretend this succeeded — a caller that gets `designs`
+      // back unchanged (no dbId) has no way to tell the DB write actually
+      // failed. Both callers (design/page.tsx's Upload Existing, chat's
+      // watchJob) already catch and surface errors; before this they'd
+      // catch nothing and carry on as if the design were really persisted —
+      // including using a fake local id anywhere a real tattoo_designs.id
+      // was expected (e.g. finalize_session).
+      const detail = error
+        ? [error.message, error.details, error.hint].filter(Boolean).join(" — ")
+        : "insert returned no rows";
+      console.error("persistDesigns failed:", detail, error);
+      throw new Error(`Couldn't save the design: ${detail}`);
     }
 
     // Map db rows back onto local design objects by image_url
@@ -372,7 +399,7 @@ export const useAppStore = create<AppState>()(
     });
   },
 
-  persistPlacement: async ({ placementText, bodyPhotoUrl, compositeUrl }) => {
+  persistPlacement: async ({ placementText, bodyPhotoUrl, compositeUrl, model, attemptId }) => {
     const { sessionId } = get();
     if (!sessionId) return null;
     const { data } = await supabase
@@ -382,12 +409,12 @@ export const useAppStore = create<AppState>()(
         placement_text: placementText ?? null,
         body_photo_url: bodyPhotoUrl ?? null,
         final_composite_url: compositeUrl ?? null,
+        generation_model: model ?? null,
+        attempt_id: attemptId ?? null,
       })
       .select("id")
       .single();
-    const id = data?.id ?? null;
-    set({ placementDbId: id });
-    return id;
+    return data?.id ?? null;
   },
 
   finalizeSession: async (designId, placementId) => {
@@ -480,8 +507,8 @@ export const useAppStore = create<AppState>()(
         rework_mode,
         status,
         users ( first_name, phone ),
-        tattoo_designs ( id, image_url, style_name, pattern_type, iteration, is_finalized ),
-        placements ( id, placement_text, body_photo_url, final_composite_url, is_finalized, created_at )
+        tattoo_designs ( id, image_url, style_name, pattern_type, iteration, is_finalized, generation_model ),
+        placements ( id, placement_text, body_photo_url, final_composite_url, is_finalized, created_at, generation_model, attempt_id )
       `)
       .eq("id", sessionId)
       .maybeSingle();
@@ -500,6 +527,7 @@ export const useAppStore = create<AppState>()(
       pattern_type: string | null;
       iteration: number;
       is_finalized: boolean;
+      generation_model: string | null;
     }>;
 
     // Use the latest iteration's designs — older iterations were superseded
@@ -513,6 +541,7 @@ export const useAppStore = create<AppState>()(
         patternType: (d.pattern_type as DesignVariant["patternType"]) ?? "mandala",
         styleName: d.style_name ?? `Variation ${i + 1}`,
         imageUrl: d.image_url,
+        model: d.generation_model ?? undefined,
       }));
 
     const finalizedDesign = latestDesigns.find((d) =>
@@ -526,16 +555,34 @@ export const useAppStore = create<AppState>()(
       final_composite_url: string | null;
       is_finalized: boolean;
       created_at: string;
+      generation_model: string | null;
+      attempt_id: string | null;
     }>;
     // Newest first — if finalize_session hasn't run yet, multiple in-flight
     // placement rows can exist; the user expects the latest preview restored.
     const sortedPlacements = [...placements].sort(
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     );
-    const activePlacement =
-      sortedPlacements.find((p) => p.is_finalized) ??
-      sortedPlacements.find((p) => p.final_composite_url) ??
-      sortedPlacements[0];
+    const finalizedPlacement = sortedPlacements.find((p) => p.is_finalized);
+    const latestWithComposite = sortedPlacements.find((p) => p.final_composite_url) ?? sortedPlacements[0];
+
+    // Once finalized, that one choice is final — restore just it, not its
+    // sibling from the same attempt. Otherwise restore every row from the
+    // most recent attempt (its whole model comparison), grouped by
+    // attempt_id — falling back to just the one row for attempts from
+    // before that column existed.
+    const placementResults: PlacementResult[] = finalizedPlacement
+      ? [{ dbId: finalizedPlacement.id, url: finalizedPlacement.final_composite_url ?? "", model: finalizedPlacement.generation_model }]
+      : !latestWithComposite
+      ? []
+      : latestWithComposite.attempt_id
+      ? sortedPlacements
+          .filter((p) => p.attempt_id === latestWithComposite.attempt_id && p.final_composite_url)
+          .map((p) => ({ dbId: p.id, url: p.final_composite_url!, model: p.generation_model }))
+      : latestWithComposite.final_composite_url
+      ? [{ dbId: latestWithComposite.id, url: latestWithComposite.final_composite_url, model: latestWithComposite.generation_model }]
+      : [];
+    const placementTextSource = finalizedPlacement ?? latestWithComposite;
 
     set({
       sessionId,
@@ -550,9 +597,8 @@ export const useAppStore = create<AppState>()(
       generatedDesigns: latestDesigns,
       selectedDesign: finalizedDesign ?? get().selectedDesign ?? latestDesigns[0] ?? null,
       iterationCount: latestIteration || 0,
-      placementText: activePlacement?.placement_text ?? "",
-      finalComposite: activePlacement?.final_composite_url ?? null,
-      placementDbId: activePlacement?.id ?? null,
+      placementText: placementTextSource?.placement_text ?? "",
+      placementResults,
       sessionStatus: (session.status as "active" | "completed" | "abandoned") ?? "active",
       hydratedSessionId: sessionId,
     });
@@ -583,8 +629,8 @@ export const useAppStore = create<AppState>()(
         refinementText: state.refinementText,
         iterationCount: state.iterationCount,
         placementText: state.placementText,
-        finalComposite: state.finalComposite,
-        placementDbId: state.placementDbId,
+        placementResults: state.placementResults,
+        initialGenerationModel: state.initialGenerationModel,
         sessionStatus: state.sessionStatus,
         hydratedSessionId: state.hydratedSessionId,
       }),
