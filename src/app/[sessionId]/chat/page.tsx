@@ -83,6 +83,16 @@ function ChatInner({ sessionId }: { sessionId: string }) {
   // happened or retry it. Flagged here instead so it always renders a real
   // "this failed, please resend" notice.
   const [deadMessageIds, setDeadMessageIds] = useState<Set<string>>(new Set());
+  // Which original job slot index produced each design — purely in-memory,
+  // reset on reload. Lets the grid render in slot order (matching "both"
+  // mode's nano/gpt alternation) instead of completion order, where
+  // whichever model responds faster would otherwise cluster at the front.
+  // Tagged with an "epoch" per message because a retry restarts slot
+  // indexing at 0 for however many images it tops up — without the epoch,
+  // an old index 0 (already done, from the original job) and a new index 0
+  // (from the retry) would collide and one of them would stop rendering.
+  const [designSlotIndex, setDesignSlotIndex] = useState<Record<string, { epoch: number; index: number }>>({});
+  const messageEpochRef = useRef<Record<string, number>>({});
   // Chat's own model choice for refinements — two-way only, no "both": one
   // small batch isn't worth splitting between models the way a fresh
   // 5-image batch is. Starts on whichever model won the first batch.
@@ -314,7 +324,9 @@ function ChatInner({ sessionId }: { sessionId: string }) {
           }));
           isGeneratingRef.current = true;
           setSending(true);
-          watchJob(lastMessage.id, status.iteration!);
+          const epoch = (messageEpochRef.current[lastMessage.id] ?? 0) + 1;
+          messageEpochRef.current[lastMessage.id] = epoch;
+          watchJob(lastMessage.id, status.iteration!, epoch);
         }
       }
     }
@@ -346,7 +358,7 @@ function ChatInner({ sessionId }: { sessionId: string }) {
   // assistant message as it lands. Every slot always ends in "done" (real
   // image) or "error" (visible tile + retry) — the loop never exits leaving
   // a slot stuck on "loading" with nothing shown for it. ─────────
-  async function watchJob(assistantMessageId: string, iteration: number) {
+  async function watchJob(assistantMessageId: string, iteration: number, epoch: number) {
     const prefix = sessionFlowType === "rework" ? "rework" : "designs";
     const imageUrls: string[] = messages.find((m) => m.id === assistantMessageId)?.image_urls.slice() ?? [];
     const designIds: string[] = messages.find((m) => m.id === assistantMessageId)?.design_ids.slice() ?? [];
@@ -415,6 +427,7 @@ function ChatInner({ sessionId }: { sessionId: string }) {
           await supabase.from("chat_messages").update({ image_urls: imageUrls, design_ids: designIds }).eq("id", assistantMessageId);
           setMessages((prev) => prev.map((m) => (m.id === assistantMessageId ? { ...m, image_urls: [...imageUrls], design_ids: [...designIds] } : m)));
           if (slot.model) setDesignModelById((prev) => ({ ...prev, [designId]: slot.model! }));
+          setDesignSlotIndex((prev) => ({ ...prev, [designId]: { epoch, index: i } }));
           setSlot(assistantMessageId, i, { status: "done" });
         } catch (err) {
           setSlot(assistantMessageId, i, { status: "error", reason: `Failed to save: ${(err as Error).message}` });
@@ -482,6 +495,8 @@ function ChatInner({ sessionId }: { sessionId: string }) {
 
       assistantMsgId = targetAssistantId;
       lastRequestByMessage.current[targetAssistantId] = req;
+      const epoch = (messageEpochRef.current[targetAssistantId] ?? 0) + 1;
+      messageEpochRef.current[targetAssistantId] = epoch;
       setPendingSlots((prev) => ({ ...prev, [targetAssistantId]: Array.from({ length: countToRequest }, () => ({ status: "loading" as const })) }));
       setSelectedIds(new Set());
       setInstruction("");
@@ -527,7 +542,7 @@ function ChatInner({ sessionId }: { sessionId: string }) {
         throw new Error(json.error ?? "Generation failed to start");
       }
 
-      await watchJob(targetAssistantId, iteration);
+      await watchJob(targetAssistantId, iteration, epoch);
     } catch (err) {
       // The request never got a job running — every slot for this message
       // is unrecoverable without a retry, so mark them all as errored
@@ -681,7 +696,7 @@ function ChatInner({ sessionId }: { sessionId: string }) {
 
       {/* Thread — capped and centered to match the composer below it, instead
           of stretching edge-to-edge on wide screens */}
-      <div className="flex-1 overflow-y-auto px-4 sm:px-6 pt-5 pb-28 sm:pb-32 flex flex-col gap-4 items-center">
+      <div className="flex-1 overflow-y-auto px-4 sm:px-6 pt-5 pb-40 sm:pb-44 flex flex-col gap-4 items-center">
         <div className="w-full sm:max-w-2xl flex flex-col gap-4">
         {messages.length === 0 && (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center py-20">
@@ -737,81 +752,83 @@ function ChatInner({ sessionId }: { sessionId: string }) {
             </div>
           ) : (
             <div key={msg.id} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 sm:gap-3 max-w-3xl">
-              {msg.design_ids.map((designId, i) => {
-                const url = msg.image_urls[i];
-                const isSelected = selectedIds.has(designId);
-                const isFinalized = finalizedIds.has(designId);
-                const modelLabel = getModelLabel(designModelById[designId]);
-                return (
-                  <div
-                    key={designId}
-                    onClick={() => setViewingId(designId)}
-                    className="relative group rounded-xl overflow-hidden border border-cleo-border bg-surface-2 cursor-pointer"
-                    style={{ aspectRatio: "1" }}
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={resolveImageSrc(url)} alt="Design" className="w-full h-full object-cover" />
-
-                    <button
-                      onClick={(e) => { e.stopPropagation(); toggleSelect(designId); }}
-                      className={`absolute top-1.5 left-1.5 w-5 h-5 rounded-md border flex items-center justify-center transition-colors cursor-pointer ${
-                        isSelected ? "bg-gold border-gold" : "bg-black/50 border-white/40 hover:border-gold"
-                      }`}
-                      title="Select for editing"
+              {(() => {
+                function designTile(designId: string, url: string) {
+                  const isSelected = selectedIds.has(designId);
+                  const isFinalized = finalizedIds.has(designId);
+                  const modelLabel = getModelLabel(designModelById[designId]);
+                  return (
+                    <div
+                      key={designId}
+                      onClick={() => setViewingId(designId)}
+                      className="relative group rounded-xl overflow-hidden border border-cleo-border bg-surface-2 cursor-pointer"
+                      style={{ aspectRatio: "1" }}
                     >
-                      {isSelected && (
-                        <svg className="w-3 h-3 text-bg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
-                          <polyline points="20 6 9 17 4 12" />
-                        </svg>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={resolveImageSrc(url)} alt="Design" className="w-full h-full object-cover" />
+
+                      <button
+                        onClick={(e) => { e.stopPropagation(); toggleSelect(designId); }}
+                        className={`absolute top-1.5 left-1.5 z-30 w-5 h-5 rounded-md border flex items-center justify-center transition-colors cursor-pointer ${
+                          isSelected ? "bg-gold border-gold" : "bg-black/50 border-white/40 hover:border-gold"
+                        }`}
+                        title="Select for editing"
+                      >
+                        {isSelected && (
+                          <svg className="w-3 h-3 text-bg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        )}
+                      </button>
+
+                      {isFinalized && (
+                        <div className="absolute top-1.5 left-8 right-1.5 flex justify-center pointer-events-none">
+                          <span className="text-[9px] font-mono uppercase tracking-wider bg-gold text-bg px-2 py-0.5 rounded-full">Finalized</span>
+                        </div>
                       )}
-                    </button>
 
-                    {isFinalized && (
-                      <div className="absolute top-1.5 left-1.5 right-1.5 flex justify-center">
-                        <span className="text-[9px] font-mono uppercase tracking-wider bg-gold text-bg px-2 py-0.5 rounded-full">Finalized</span>
-                      </div>
-                    )}
+                      {/* Bottom-right, not top-right — a long label ("GPT
+                          Image to Image") grows leftward from its anchor and
+                          was overlapping (and stealing clicks from) the
+                          select checkbox at top-left. z-20 keeps it visible
+                          over the Finalize bar on hover, same as the number. */}
+                      {modelLabel && (
+                        <div className="absolute bottom-1.5 right-1.5 z-20">
+                          <span className="text-[8px] font-mono uppercase tracking-wider bg-black/70 backdrop-blur-sm text-gold px-1.5 py-0.5 rounded-full border border-gold/20">
+                            {modelLabel}
+                          </span>
+                        </div>
+                      )}
 
-                    {modelLabel && (
-                      <div className="absolute top-1.5 right-1.5">
-                        <span className="text-[8px] font-mono uppercase tracking-wider bg-black/70 backdrop-blur-sm text-gold px-1.5 py-0.5 rounded-full border border-gold/20">
-                          {modelLabel}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); requestUse(designId, url); }}
+                        disabled={finalizing === designId}
+                        className="absolute bottom-0 left-0 right-0 bg-black/70 backdrop-blur-sm text-white text-[10px] font-mono uppercase tracking-wider py-1.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer hover:bg-gold hover:text-bg disabled:opacity-50"
+                      >
+                        {finalizing === designId ? "Finalizing…" : "✦ Finalize"}
+                      </button>
+
+                      {/* Sequential image number across the whole thread — z-20
+                          so it stays visible over the Finalize bar on hover.
+                          Solid gold fill (not the dark/gold-text style used
+                          elsewhere) so it reads clearly at a glance over any
+                          image, light or dark. */}
+                      <div className="absolute bottom-1.5 left-1.5 z-20">
+                        <span className="w-6 h-6 rounded-full bg-gold text-bg text-[11px] font-mono font-bold flex items-center justify-center shadow-[0_1px_4px_rgba(0,0,0,0.6)]">
+                          {designNumberById[designId]}
                         </span>
                       </div>
-                    )}
-
-                    <button
-                      onClick={(e) => { e.stopPropagation(); requestUse(designId, url); }}
-                      disabled={finalizing === designId}
-                      className="absolute bottom-0 left-0 right-0 bg-black/70 backdrop-blur-sm text-white text-[10px] font-mono uppercase tracking-wider py-1.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer hover:bg-gold hover:text-bg disabled:opacity-50"
-                    >
-                      {finalizing === designId ? "Finalizing…" : "✦ Finalize"}
-                    </button>
-
-                    {/* Sequential image number across the whole thread — z-20
-                        so it stays visible over the Finalize bar on hover.
-                        Solid gold fill (not the dark/gold-text style used
-                        elsewhere) so it reads clearly at a glance over any
-                        image, light or dark. */}
-                    <div className="absolute bottom-1.5 left-1.5 z-20">
-                      <span className="w-6 h-6 rounded-full bg-gold text-bg text-[11px] font-mono font-bold flex items-center justify-center shadow-[0_1px_4px_rgba(0,0,0,0.6)]">
-                        {designNumberById[designId]}
-                      </span>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                }
 
-              {/* In-flight slots: loading spinner, or an error tile with its own retry */}
-              {(pendingSlots[msg.id] ?? []).map((slot, i) => {
-                if (slot.status === "done") return null;
-                if (slot.status === "error") {
+                function errorTile(key: string, reason: string | undefined) {
                   return (
-                    <div key={`slot-${i}`} className="rounded-xl overflow-hidden border border-error/40 bg-error/5 flex flex-col items-center justify-center gap-2 p-2 text-center" style={{ aspectRatio: "1" }}>
+                    <div key={key} className="rounded-xl overflow-hidden border border-error/40 bg-error/5 flex flex-col items-center justify-center gap-2 p-2 text-center" style={{ aspectRatio: "1" }}>
                       <svg className="w-5 h-5 text-error/80 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
                       </svg>
-                      <p className="text-error text-[10px] leading-snug line-clamp-3">{slot.reason ?? "Failed to generate."}</p>
+                      <p className="text-error text-[10px] leading-snug line-clamp-3">{reason ?? "Failed to generate."}</p>
                       {!sending && (
                         <button
                           onClick={() => retryGeneration(msg.id)}
@@ -823,14 +840,52 @@ function ChatInner({ sessionId }: { sessionId: string }) {
                     </div>
                   );
                 }
-                return (
-                  <div key={`slot-${i}`} className="rounded-xl overflow-hidden border border-cleo-border" style={{ aspectRatio: "1" }}>
-                    <div className="w-full h-full skeleton flex items-center justify-center">
-                      <div className="w-5 h-5 border-2 border-gold/50 border-t-transparent rounded-full animate-spin" />
+
+                function loadingTile(key: string) {
+                  return (
+                    <div key={key} className="rounded-xl overflow-hidden border border-cleo-border" style={{ aspectRatio: "1" }}>
+                      <div className="w-full h-full skeleton flex items-center justify-center">
+                        <div className="w-5 h-5 border-2 border-gold/50 border-t-transparent rounded-full animate-spin" />
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                }
+
+                const slots = pendingSlots[msg.id];
+                if (!slots) {
+                  // No live slot tracking for this message (it was already
+                  // fully settled before this page load) — the only order
+                  // left is whatever was persisted (completion order).
+                  return msg.design_ids.map((designId, i) => designTile(designId, msg.image_urls[i]));
+                }
+
+                // Live tracking exists — render one tile per original slot
+                // index instead of two separate lists (done, then pending),
+                // so "both" mode's nano/gpt alternation shows in position
+                // even when one model consistently answers faster than the
+                // other (which would otherwise cluster all of it at the front).
+                // Scoped to the CURRENT epoch only — a retry that tops up a
+                // partial failure starts slot numbering over at 0, so an old
+                // "index 0" (already done, from the original job) and a new
+                // "index 0" (from the retry) must never be treated as the
+                // same position. Anything from an earlier epoch (or from
+                // before a reload, which has no epoch at all) just renders
+                // up front in its already-persisted order instead.
+                const epoch = messageEpochRef.current[msg.id];
+                const carriedOverIds = msg.design_ids.filter((id) => designSlotIndex[id]?.epoch !== epoch);
+                const currentEpochIds = msg.design_ids.filter((id) => designSlotIndex[id]?.epoch === epoch);
+                const carriedOverTiles = carriedOverIds.map((id) => designTile(id, msg.image_urls[msg.design_ids.indexOf(id)]));
+                const currentTiles = slots.map((slot, i) => {
+                  if (slot.status === "done") {
+                    const designId = currentEpochIds.find((id) => designSlotIndex[id]?.index === i);
+                    if (!designId) return null;
+                    return designTile(designId, msg.image_urls[msg.design_ids.indexOf(designId)]);
+                  }
+                  if (slot.status === "error") return errorTile(`slot-${i}`, slot.reason);
+                  return loadingTile(`slot-${i}`);
+                });
+                return [...carriedOverTiles, ...currentTiles];
+              })()}
             </div>
           )
         ))}

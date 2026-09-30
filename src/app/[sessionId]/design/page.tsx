@@ -243,8 +243,13 @@ export default function DesignPage({ params }: { params: Promise<{ sessionId: st
       // 'ai_design', and every entry-point router (SessionOverview's
       // continueUrl, customer/[userId]'s resumeUrl) misreads this as a real
       // AI Design session instead of an Upload Existing one — see AGENTS.md's
-      // "`flow_type` has three values, not two" note.
-      await supabase.from("sessions").update({ flow_type: "direct" }).eq("id", sessionId);
+      // "`flow_type` has three values, not two" note. Error MUST be checked
+      // here — a stale DB check constraint silently rejected every 'direct'
+      // write for a while (constraint said only ai_design/rework were legal)
+      // and this line swallowed it, so every Upload Existing session quietly
+      // stayed flagged 'ai_design' and resumed to Design instead of Placement.
+      const { error: flowTypeErr } = await supabase.from("sessions").update({ flow_type: "direct" }).eq("id", sessionId);
+      if (flowTypeErr) throw new Error(`Couldn't save the upload type: ${flowTypeErr.message}`);
       router.push(`/${sessionId}/placement`);
     } catch (err) {
       setDirectError((err as Error).message);
