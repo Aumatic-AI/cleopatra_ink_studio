@@ -77,7 +77,7 @@ export default function Home() {
             <div className="flex-1 h-px bg-gradient-to-l from-transparent to-gold/40" />
           </div>
           <p className="text-muted text-xs tracking-[0.18em] uppercase font-cinzel">
-            AI-Powered Tattoo Design
+            Custom Tattoo Design
           </p>
         </div>
 
