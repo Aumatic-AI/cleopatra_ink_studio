@@ -130,7 +130,7 @@ interface AppState {
   // Supabase persistence
   persistDesigns: (designs: DesignVariant[], meta?: { iteration?: number; parentDesignIds?: string[]; userInstruction?: string }) => Promise<DesignVariant[]>;
   persistPlacement: (data: { placementText?: string; bodyPhotoUrl?: string; compositeUrl?: string; model?: string; attemptId?: string }) => Promise<string | null>;
-  finalizeSession: (designId: string, placementId: string) => Promise<void>;
+  finalizeSession: (designId: string, placementId: string, comment?: string) => Promise<void>;
   finalizeReworkSession: (designId: string) => Promise<void>;
   // Restore state from Supabase for the given session (used after reload)
   hydrateFromSession: (sessionId: string) => Promise<void>;
@@ -417,15 +417,21 @@ export const useAppStore = create<AppState>()(
     return data?.id ?? null;
   },
 
-  finalizeSession: async (designId, placementId) => {
+  finalizeSession: async (designId, placementId, comment) => {
     const { sessionId } = get();
     if (!sessionId) return;
+
+    // Optional note from the finalize modal. Only sent when non-blank, so a
+    // finalize with no comment still works against a database that hasn't
+    // had the finalize_comment migration applied yet.
+    const trimmedComment = comment?.trim() || null;
 
     // Fast path: the SQL RPC does mark+prune+complete+analytics atomically.
     const { error: rpcError } = await supabase.rpc("finalize_session", {
       p_session_id: sessionId,
       p_design_id: designId,
       p_placement_id: placementId,
+      ...(trimmedComment ? { p_comment: trimmedComment } : {}),
     });
     if (!rpcError) { set({ sessionStatus: "completed" }); return; }
 
@@ -444,7 +450,10 @@ export const useAppStore = create<AppState>()(
 
     const [designUpdate, placementUpdate] = await Promise.all([
       supabase.from("tattoo_designs").update({ is_finalized: true }).eq("id", designId),
-      supabase.from("placements").update({ is_finalized: true }).eq("id", placementId),
+      supabase
+        .from("placements")
+        .update({ is_finalized: true, ...(trimmedComment ? { finalize_comment: trimmedComment } : {}) })
+        .eq("id", placementId),
     ]);
     if (designUpdate.error) throw new Error(`Finalize fallback: design update failed — ${designUpdate.error.message}`);
     if (placementUpdate.error) throw new Error(`Finalize fallback: placement update failed — ${placementUpdate.error.message}`);
