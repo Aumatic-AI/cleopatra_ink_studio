@@ -11,6 +11,7 @@ export interface Database {
           p_session_id: string;
           p_design_id: string;
           p_placement_id: string;
+          p_comment?: string | null;
         };
         Returns: void;
       };
@@ -144,6 +145,7 @@ export interface Database {
           body_photo_url: string | null;
           final_composite_url: string | null;
           is_finalized: boolean;
+          finalize_comment: string | null;
           created_at: string;
         };
         Insert: {
@@ -153,6 +155,7 @@ export interface Database {
           body_photo_url?: string | null;
           final_composite_url?: string | null;
           is_finalized?: boolean;
+          finalize_comment?: string | null;
           created_at?: string;
         };
         Update: {
@@ -160,6 +163,7 @@ export interface Database {
           body_photo_url?: string | null;
           final_composite_url?: string | null;
           is_finalized?: boolean;
+          finalize_comment?: string | null;
         };
       };
       user_preferences: {

@@ -33,6 +33,8 @@ const QUICK_PLACEMENTS = [
   "Behind the ear",
 ];
 
+const FINALIZE_COMMENT_MAX_LENGTH = 1000;
+
 const PLACEMENT_POLL_INTERVAL_MS = 4000;
 const MAX_NOT_FOUND_ATTEMPTS = 3; // grace period for a job that was *just* started
 
@@ -150,6 +152,13 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
   const [placementComposite, setPlacementComposite] = useState<string | null>(null);
   // dbId of whichever result tile is currently being finalized
   const [finalizingDbId, setFinalizingDbId] = useState<string | null>(null);
+  // Preview tile whose "Use This" was clicked — drives the finalize
+  // confirmation modal (with its optional comment field). Null = closed.
+  const [confirmingFinalize, setConfirmingFinalize] = useState<PlacementResult | null>(null);
+  const [finalizeComment, setFinalizeComment] = useState("");
+  const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  // Comment actually saved with the finalize — shown on the summary screen.
+  const [savedComment, setSavedComment] = useState<string | null>(null);
   // Seconds elapsed since the current generation started; drives the loading UI.
   const [elapsed, setElapsed] = useState(0);
   const loadingRef = useRef<HTMLDivElement>(null);
@@ -317,17 +326,36 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
     }
   }
 
-  async function handleFinalize(dbId: string) {
+  // "Use This" on a preview tile only opens the confirmation modal — the
+  // actual finalize happens from the modal, so staff can add an optional
+  // comment first.
+  function requestFinalize(result: PlacementResult) {
+    setFinalizeComment("");
+    setFinalizeError(null);
+    setConfirmingFinalize(result);
+  }
+
+  function closeFinalizeModal() {
+    if (finalizingDbId) return; // don't dismiss mid-save
+    setConfirmingFinalize(null);
+    setFinalizeError(null);
+  }
+
+  async function handleFinalize(dbId: string, comment: string) {
     if (!selectedDesign?.dbId) {
-      setError("Unable to finalize — please regenerate and try again.");
+      setFinalizeError("Unable to finalize — please regenerate and try again.");
       return;
     }
     setFinalizingDbId(dbId);
+    setFinalizeError(null);
     try {
-      await finalizeSession(selectedDesign.dbId, dbId);
+      await finalizeSession(selectedDesign.dbId, dbId, comment);
+      setSavedComment(comment.trim() || null);
+      setConfirmingFinalize(null);
       setDone(true);
     } catch (err) {
-      setError((err as Error).message);
+      // Keep the modal open so the typed comment isn't lost on a retry.
+      setFinalizeError((err as Error).message);
     } finally {
       setFinalizingDbId(null);
     }
@@ -403,6 +431,15 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
               <span className="text-muted text-xs font-mono">Customer</span>
               <span className="text-ink text-xs font-cinzel font-bold">{customerName}</span>
             </div>
+            {savedComment && (
+              <>
+                <div className="h-px bg-cleo-border" />
+                <div className="flex flex-col gap-1">
+                  <span className="text-muted text-xs font-mono">Comment</span>
+                  <p className="text-ink text-xs leading-relaxed whitespace-pre-wrap break-words">{savedComment}</p>
+                </div>
+              </>
+            )}
           </div>
 
           <motion.button
@@ -427,6 +464,93 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
             onCapture={(url) => { setBodyPhoto(url); setShowCamera(false); setPlacementComposite(null); }}
             onClose={() => setShowCamera(false)}
           />
+        )}
+      </AnimatePresence>
+
+      {/* ── Finalize confirmation (with optional comment) ─────────────── */}
+      <AnimatePresence>
+        {confirmingFinalize && (
+          <motion.div
+            key="finalize-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={closeFinalizeModal}
+            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto"
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 10, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.97 }}
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="finalize-placement-title"
+              className="bg-surface border border-cleo-border rounded-2xl p-5 max-w-sm w-full flex flex-col gap-4 my-auto"
+            >
+              <div className="w-full aspect-square rounded-xl overflow-hidden border border-cleo-border bg-surface-2 relative">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={confirmingFinalize.url} alt="Placement to finalize" className="w-full h-full object-contain" />
+                {getModelLabel(confirmingFinalize.model) && (
+                  <div className="absolute bottom-2 right-2 bg-black/70 backdrop-blur-sm text-gold text-[10px] font-mono px-2 py-1 rounded-lg border border-gold/20">
+                    {getModelLabel(confirmingFinalize.model)}
+                  </div>
+                )}
+              </div>
+              <div>
+                <h2 id="finalize-placement-title" className="font-cinzel text-base font-bold text-ink">
+                  Finalize this placement?
+                </h2>
+                <p className="text-muted text-xs mt-1 leading-relaxed">
+                  This completes the session for {customerName || "this customer"} with this design and placement.
+                </p>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label
+                  htmlFor="finalize-comment"
+                  className="text-[10px] font-mono tracking-[0.15em] uppercase text-muted"
+                >
+                  Comment <span className="normal-case tracking-normal text-muted/60">(optional)</span>
+                </label>
+                <textarea
+                  id="finalize-comment"
+                  rows={3}
+                  maxLength={FINALIZE_COMMENT_MAX_LENGTH}
+                  placeholder="e.g. Customer wants it slightly smaller, booked for next Friday…"
+                  value={finalizeComment}
+                  onChange={(e) => setFinalizeComment(e.target.value)}
+                  disabled={!!finalizingDbId}
+                  className="bg-bg border border-cleo-border rounded-xl px-3.5 py-2.5 text-ink text-sm placeholder:text-muted/50 focus:border-gold focus:outline-none transition-colors resize-none leading-relaxed disabled:opacity-60"
+                />
+                {finalizeComment.length > FINALIZE_COMMENT_MAX_LENGTH * 0.8 && (
+                  <p className="text-muted/60 text-[10px] font-mono text-right">
+                    {finalizeComment.length}/{FINALIZE_COMMENT_MAX_LENGTH}
+                  </p>
+                )}
+              </div>
+              {finalizeError && (
+                <p className="text-error text-xs font-mono leading-relaxed break-words bg-error/10 border border-error/40 rounded-lg px-3 py-2">
+                  {finalizeError}
+                </p>
+              )}
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={closeFinalizeModal}
+                  disabled={!!finalizingDbId}
+                  className="flex-1 py-3 rounded-xl font-cinzel font-bold text-xs tracking-[0.08em] uppercase border border-cleo-border text-muted hover:text-ink transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => handleFinalize(confirmingFinalize.dbId, finalizeComment)}
+                  disabled={!!finalizingDbId}
+                  className="flex-1 py-3 rounded-xl bg-gold text-bg font-cinzel font-bold text-xs tracking-[0.08em] uppercase border border-gold hover:bg-gold-light transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {finalizingDbId ? "Saving…" : "✦ Finalize"}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
 
@@ -777,7 +901,7 @@ export default function PlacementPage({ params }: { params: Promise<{ sessionId:
                         <motion.button
                           whileHover={finalizingDbId ? {} : { scale: 1.02 }}
                           whileTap={finalizingDbId ? {} : { scale: 0.97 }}
-                          onClick={() => handleFinalize(result.dbId)}
+                          onClick={() => requestFinalize(result)}
                           disabled={!!finalizingDbId}
                           className="w-full bg-gold text-bg font-cinzel font-bold text-sm tracking-[0.08em] uppercase py-3.5 rounded-xl border border-gold hover:bg-gold-light transition-colors cursor-pointer shadow-[0_0_24px_rgba(201,168,76,0.3)] disabled:opacity-60 disabled:cursor-not-allowed"
                         >

@@ -19,6 +19,7 @@ drop table if exists users            cascade;
 
 -- Drop existing functions
 drop function if exists finalize_session(text, uuid, uuid);
+drop function if exists finalize_session(text, uuid, uuid, text);
 drop function if exists finalize_rework_session(text, uuid);
 drop function if exists is_admin();
 drop function if exists is_designer();
@@ -163,6 +164,10 @@ create table placements (
   -- always 2 — one per model, see AGENTS.md) so they group together as one
   -- comparison on reload. Null for attempts from before this column existed.
   attempt_id          uuid,
+  -- Optional free-text note staff can leave in the finalize confirmation
+  -- modal on the Placement screen. Written by finalize_session() onto the
+  -- row being finalized; null when left blank or never finalized.
+  finalize_comment    text,
   created_at          timestamptz not null default now()
 );
 
@@ -266,10 +271,13 @@ $$;
 -- kept so staff can come back later and finalize a different one instead.
 -- Analytics path: upserts user_preferences — wrapped in EXCEPTION so it never
 --   aborts the critical path.
+-- p_comment is the optional note from the finalize modal — stored on the
+-- finalized placement row (blank/whitespace-only becomes null).
 create or replace function finalize_session(
   p_session_id   text,
   p_design_id    uuid,
-  p_placement_id uuid
+  p_placement_id uuid,
+  p_comment      text default null
 )
 returns void language plpgsql security definer as $$
 declare
@@ -282,7 +290,9 @@ begin
   update tattoo_designs set is_finalized = false where session_id = p_session_id and is_finalized = true;
   update tattoo_designs set is_finalized = true  where id = p_design_id;
   update placements      set is_finalized = false where session_id = p_session_id and is_finalized = true;
-  update placements      set is_finalized = true  where id = p_placement_id;
+  update placements      set is_finalized = true,
+                             finalize_comment = nullif(btrim(p_comment), '')
+                       where id = p_placement_id;
   update sessions set status = 'completed', completed_at = now() where id = p_session_id;
 
   -- Analytics path — isolated, never aborts the critical path

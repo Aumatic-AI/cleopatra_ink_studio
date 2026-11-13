@@ -335,14 +335,16 @@ and the session-flow pages are reached by both roles.
 | `sessions` | `id`, `user_id`, `designer_id` ("handled by," see Architecture Notes), `tattoo_style`, `tattoo_description`, `target_body_area`, `flow_type` (ai_design\|rework\|direct, see Architecture Notes), `status` (active\|completed\|abandoned), `deleted_at` |
 | `tattoo_designs` | `id`, `session_id`, `image_url`, `style_name`, `pattern_type`, `iteration`, `is_finalized`, `parent_design_ids[]`, `flash_image_url`, `generation_model` |
 | `chat_messages` | `id`, `session_id`, `role` (user\|assistant), `content`, `image_urls[]`, `design_ids[]` — the chat screen's source of truth |
-| `placements` | `id`, `session_id`, `placement_text`, `body_photo_url`, `final_composite_url`, `is_finalized`, `generation_model`, `attempt_id` |
+| `placements` | `id`, `session_id`, `placement_text`, `body_photo_url`, `final_composite_url`, `is_finalized`, `generation_model`, `attempt_id`, `finalize_comment` (optional note from the Placement finalize modal) |
 | `user_preferences` | `user_id`, `preferred_styles[]`, `preferred_placements[]` |
 | `generation_jobs` | `job_key`, `iteration`, `parent_design_ids[]`, `user_instruction`, `created_at` — start-job/poll tracker, service-role only |
 | `generation_job_slots` | `job_key`, `slot_index`, `status`, `image_base64`, `reason`, `code`, `model` — one row per parallel generation task |
 
-**RPC:** `finalize_session(p_session_id, p_design_id, p_placement_id)` —
+**RPC:** `finalize_session(p_session_id, p_design_id, p_placement_id, p_comment default null)` —
 marks finalized rows, prunes siblings, completes session, updates
-preferences.
+preferences, and stores the optional finalize comment on the finalized
+placement row. Every placement "Use This" opens a confirm modal with that
+optional comment field before calling it.
 
 **RLS:** Admin sees/edits everything (`is_admin()`). Designer sees only
 sessions/designs/placements/chat where `designer_id = auth.uid()`. Service

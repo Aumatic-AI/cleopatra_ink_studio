@@ -27,6 +27,7 @@ interface PlacementRow {
   body_photo_url: string | null;
   final_composite_url: string | null;
   is_finalized: boolean;
+  finalize_comment: string | null;
 }
 
 interface SessionDetail {
@@ -190,7 +191,7 @@ export default function SessionOverview({ sessionId, from, defaultBackUrl, defau
           users(first_name, phone),
           designer:designer_id(name, email),
           tattoo_designs(id, image_url, style_name, pattern_type, iteration, is_finalized, flash_image_url),
-          placements(id, placement_text, body_photo_url, final_composite_url, is_finalized),
+          placements(id, placement_text, body_photo_url, final_composite_url, is_finalized, finalize_comment),
           chat_messages(id)
         `)
         .eq("id", sessionId)
@@ -647,6 +648,19 @@ export default function SessionOverview({ sessionId, from, defaultBackUrl, defau
                   )}
                 </div>
               </div>
+              {finalPlacement.is_finalized && finalPlacement.finalize_comment && (
+                <div className="flex items-start gap-3 border-t border-cleo-border pt-4">
+                  <svg className="w-5 h-5 text-gold flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.86 9.86 0 01-4-.83L3 20l1.4-3.72A7.6 7.6 0 013 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                  </svg>
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-mono uppercase tracking-widest text-muted">Finalize Comment</p>
+                    <p className="text-ink text-sm leading-relaxed whitespace-pre-wrap break-words mt-0.5">
+                      {finalPlacement.finalize_comment}
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </motion.div>
