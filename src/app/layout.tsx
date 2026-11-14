@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import type { Viewport } from "next";
-import { Cinzel, Nunito, Space_Mono } from "next/font/google";
+import { Cinzel, Space_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import AdminSidebarShell from "@/components/layout/AdminSidebarShell";
 import "./globals.css";
 
@@ -11,10 +12,18 @@ const cinzel = Cinzel({
   display: "swap",
 });
 
-const nunito = Nunito({
+// Self-hosted rather than next/font/google: Vercel builds failed resolving
+// Nunito's Google font files under Turbopack ("Can't resolve
+// '@vercel/turbopack-next/internal/font/google/font' … next/font/google
+// queries have exactly one entry") even though the same code built fine
+// locally — bundling the file removes the build-time Google Fonts fetch.
+// Nunito is a variable font, so this one latin-subset file (fonts.gstatic.com
+// v32, OFL-licensed — see fonts/Nunito-OFL.txt) covers every weight; the
+// "300 700" range matches the weights the Google config used to load.
+const nunito = localFont({
+  src: "./fonts/Nunito-latin-variable.woff2",
   variable: "--font-nunito",
-  subsets: ["latin"],
-  weight: ["300", "400", "600", "700"],
+  weight: "300 700",
   display: "swap",
 });
 
